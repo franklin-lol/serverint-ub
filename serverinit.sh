@@ -10,7 +10,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh \
 #     -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
 # ── Versions (update here only) ───────────────────────────────────────────────
 NVM_VERSION="0.40.1"
@@ -41,6 +41,9 @@ fi
 if ! ( exec < /dev/tty ) 2>/dev/null; then
   err "Нет доступа к /dev/tty.\nСкачайте скрипт и запустите напрямую: sudo bash serverinit.sh"
 fi
+
+# Cleanup old logs (keep only last 5)
+find /root -maxdepth 1 -name "serverinit_*.log" -type f | sort -r | tail -n +6 | xargs rm -f 2>/dev/null || true
 
 LOG_FILE="/root/serverinit_$(date +%Y%m%d_%H%M%S).log"
 exec 3>&1
@@ -150,7 +153,9 @@ OS_NAME=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
 # hostname -I returns empty on some cloud-init images — fallback to public IP
 IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
 if [[ -z "$IP_ADDR" ]]; then
-  IP_ADDR=$(curl -fsSL --max-time 5 https://ipinfo.io/ip 2>/dev/null || echo "n/a")
+  IP_ADDR=$(curl -fsSL --max-time 5 https://ifconfig.me 2>/dev/null \
+    || curl -fsSL --max-time 5 https://ipinfo.io/ip 2>/dev/null \
+    || echo "n/a")
 fi
 
 echo -e "${BOLD}  System snapshot${NC}"
@@ -413,7 +418,7 @@ EOF
   # SSH hardening
   info "Hardening SSH..."
   SSH_CFG="/etc/ssh/sshd_config"
-  SSH_BACKUP="${SSH_CFG}.bak.$(date +%s)"
+  SSH_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
   cp "$SSH_CFG" "$SSH_BACKUP"
 
   sed -i "s/^#*Port .*/Port $SSH_PORT/" "$SSH_CFG"
@@ -450,13 +455,13 @@ EOF
   grep -q "^MaxStartups"         "$SSH_CFG" || echo "MaxStartups 10:30:60"    >> "$SSH_CFG"
 
   # Validate → apply or rollback
-  if sshd -t 2>/dev/null; then
+  if /usr/sbin/sshd -t 2>/dev/null; then
     restart_ssh
     ok "SSH hardened: порт $SSH_PORT"
   else
     warn "sshd_config невалиден — откатываем конфиг"
     cp "$SSH_BACKUP" "$SSH_CFG"
-    if sshd -t 2>/dev/null; then
+    if /usr/sbin/sshd -t 2>/dev/null; then
       restart_ssh
       warn "SSH восстановлен из бэкапа $SSH_BACKUP"
     else
@@ -471,7 +476,10 @@ EOF
   # Unattended security upgrades
   info "Настраиваем автообновления безопасности..."
   retry apt-get install -y -qq unattended-upgrades > /dev/null 2>&1
-  cat > /etc/apt/apt.conf.d/50unattended-upgrades-serverinit << 'EOF'
+  
+  U_CFG="/etc/apt/apt.conf.d/50unattended-upgrades-serverinit"
+  if [[ ! -f "$U_CFG" ]]; then
+    cat > "$U_CFG" << 'EOF'
 Unattended-Upgrade::Allowed-Origins {
   "${distro_id}:${distro_codename}-security";
 };
@@ -479,9 +487,12 @@ Unattended-Upgrade::AutoFixInterruptedDpkg "true";
 Unattended-Upgrade::Remove-Unused-Dependencies "true";
 Unattended-Upgrade::Automatic-Reboot "false";
 EOF
-  echo 'APT::Periodic::Update-Package-Lists "1";
+    echo 'APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";' > /etc/apt/apt.conf.d/20auto-upgrades
-  ok "Автообновления безопасности включены"
+    ok "Автообновления безопасности включены"
+  else
+    warn "Конфиг автообновлений $U_CFG уже существует — пропущено"
+  fi
 
   # Shared memory protection
   if [[ -d /dev/shm ]]; then
@@ -489,9 +500,12 @@ APT::Periodic::Unattended-Upgrade "1";' > /etc/apt/apt.conf.d/20auto-upgrades
   else
     SHM_MOUNT="/run/shm"
   fi
-  grep -q "$SHM_MOUNT" /etc/fstab || \
+  if ! grep -q "$SHM_MOUNT" /etc/fstab; then
     echo "tmpfs $SHM_MOUNT tmpfs defaults,noexec,nosuid,nodev 0 0" >> /etc/fstab
-  ok "Защита shared memory настроена ($SHM_MOUNT)"
+    ok "Защита shared memory настроена ($SHM_MOUNT)"
+  else
+    ok "Защита shared memory уже в fstab"
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -549,24 +563,36 @@ https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
 }
 EOF
     ok "Docker daemon оптимизирован (логи: 10MB × 3)"
+    systemctl reload-or-restart docker > /dev/null 2>&1 || true
   else
     warn "daemon.json уже существует — конфиг не перезаписан. Проверь: $DOCKER_DAEMON"
   fi
 
-  systemctl reload-or-restart docker > /dev/null 2>&1 || true
-
-  # Docker + UFW: Docker bypasses UFW via direct iptables manipulation.
-  # Insert a DROP rule into DOCKER-USER chain so only explicitly allowed
-  # connections reach containers. Loopback and established connections pass.
+  # Docker + UFW: Idempotent rules with correct order using -C check
   if iptables -L DOCKER-USER > /dev/null 2>&1; then
-    iptables -I DOCKER-USER -j DROP 2>/dev/null || true
-    iptables -I DOCKER-USER -i lo -j ACCEPT 2>/dev/null || true
-    iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+    info "Настраиваем DOCKER-USER цепочку..."
+    
+    # 1. Allow Loopback
+    iptables -C DOCKER-USER -i lo -j ACCEPT 2>/dev/null || \
+      iptables -I DOCKER-USER 1 -i lo -j ACCEPT
+    
+    # 2. Allow Established/Related
+    iptables -C DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+      iptables -I DOCKER-USER 2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # Open only what UFW already knows about (SSH, 80, 443)
-    iptables -I DOCKER-USER -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || true
-    iptables -I DOCKER-USER -p tcp --dport 80  -j ACCEPT 2>/dev/null || true
-    iptables -I DOCKER-USER -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+    # 3. Allow explicitly opened ports (SSH, 80, 443)
+    iptables -C DOCKER-USER -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || \
+      iptables -I DOCKER-USER 3 -p tcp --dport "$SSH_PORT" -j ACCEPT
+    
+    iptables -C DOCKER-USER -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
+      iptables -I DOCKER-USER 4 -p tcp --dport 80 -j ACCEPT
+    
+    iptables -C DOCKER-USER -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
+      iptables -I DOCKER-USER 5 -p tcp --dport 443 -j ACCEPT
+
+    # 4. Final DROP (must be at the end)
+    iptables -C DOCKER-USER -j DROP 2>/dev/null || \
+      iptables -A DOCKER-USER -j DROP
 
     # Persist rules across reboots
     if apt-get install -y -qq iptables-persistent > /dev/null 2>&1; then
@@ -577,10 +603,7 @@ EOF
     fi
     ok "Docker + UFW: DOCKER-USER цепочка защищена"
   else
-    warn "DOCKER-USER цепочка не найдена — запусти Docker и повтори вручную:
-  iptables -I DOCKER-USER -j DROP
-  iptables -I DOCKER-USER -i lo -j ACCEPT
-  iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+    warn "DOCKER-USER цепочка не найдена — запусти Docker и повтори вручную"
   fi
 
   install_nginx
@@ -599,8 +622,9 @@ if [[ $STACK_CHOICE -eq 2 ]]; then
   # Run everything as the target user to avoid root-owned NVM
   su - "$TARGET_USER" -c "
     export NVM_DIR='$NVM_DIR_PATH'
-    curl -fsSL 'https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh' \
-      | bash > /dev/null 2>&1
+    curl -fsSL 'https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh' -o /tmp/nvm_install.sh
+    bash /tmp/nvm_install.sh > /dev/null 2>&1
+    rm -f /tmp/nvm_install.sh
     [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
     nvm install $NODE_LTS        > /dev/null 2>&1
     nvm use     $NODE_LTS        > /dev/null 2>&1

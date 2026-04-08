@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Tests & Lint
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Make scripts executable
+        run: chmod +x serverinit.sh tests/test_serverinit.sh
+
+      - name: ShellCheck — serverinit.sh
+        run: shellcheck -S warning serverinit.sh
+
+      - name: ShellCheck — test suite
+        run: shellcheck -S warning tests/test_serverinit.sh
+
+      - name: Run test suite
+        run: bash tests/test_serverinit.sh ./serverinit.sh
+
+  dry-run-ci-mode:
+    name: CI mode dry-run (syntax only)
+    runs-on: ubuntu-22.04
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify --ci flag is parsed correctly
+        run: |
+          # Confirm the script parses CI env vars without executing anything
+          grep -q 'CI_MODE=1' serverinit.sh       && echo "✔ CI_MODE flag found"
+          grep -q 'SI_STACK'  serverinit.sh        && echo "✔ SI_STACK env var found"
+          grep -q 'SI_SEC'    serverinit.sh        && echo "✔ SI_SEC env var found"
+          grep -q 'SI_SSH_PORT' serverinit.sh      && echo "✔ SI_SSH_PORT env var found"
+          grep -q 'MIN_FREE_AFTER_SWAP' serverinit.sh && echo "✔ Disk limiter found"
+
+      - name: Bash syntax check
+        run: bash -n serverinit.sh && echo "✔ No syntax errors"

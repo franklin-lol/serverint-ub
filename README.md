@@ -1,131 +1,220 @@
-# ServerInit
+<div align="center">
 
-[![Shell](https://img.shields.io/badge/shell-bash_5%2B-blue)](https://www.gnu.org/software/bash/)
-[![Platform](https://img.shields.io/badge/platform-Ubuntu%20%7C%20Debian-orange)](https://ubuntu.com/)
+```
+  ███████╗███████╗██████╗ ██╗   ██╗███████╗██████╗
+  ██╔════╝██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗
+  ███████╗█████╗  ██████╔╝██║   ██║█████╗  ██████╔╝
+  ╚════██║██╔══╝  ██╔══██╗╚██╗ ██╔╝██╔══╝  ██╔══██╗
+  ███████║███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║
+  ╚══════╝╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝
+          ██╗███╗   ██╗██╗████████╗
+          ██║████╗  ██║██║╚══██╔══╝
+          ██║██╔██╗ ██║██║   ██║
+          ██║██║╚██╗██║██║   ██║
+          ██║██║ ╚████║██║   ██║
+          ╚═╝╚═╝  ╚═══╝╚═╝   ╚═╝
+```
+
+**Universal production server setup — Ubuntu & Debian**
+
+[![CI](https://github.com/franklin-lol/serverint-ub/actions/workflows/ci.yml/badge.svg)](https://github.com/franklin-lol/serverint-ub/actions/workflows/ci.yml)
+[![ShellCheck](https://img.shields.io/badge/shellcheck-passing-brightgreen)](https://github.com/koalaman/shellcheck)
+[![Platform](https://img.shields.io/badge/platform-Ubuntu%2020%2F22%2F24%20·%20Debian%2011%2F12-blue)](https://ubuntu.com/)
+[![Shell](https://img.shields.io/badge/shell-bash%205%2B-blue)](https://www.gnu.org/software/bash/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-36%20passing-brightgreen)](tests/test_serverinit.sh)
 
-> Universal production server initialization script for Ubuntu and Debian.  
-> Replaces hours of routine setup with three questions and five minutes of execution.
+</div>
+
+> Replaces hours of repetitive server provisioning with **three questions and five minutes**.
+> Interactive or fully unattended — your choice.
 
 **Language / Язык:** [English](#english) · [Русский](#russian)
 
 ---
 
 <a name="english"></a>
-## English
 
-### Overview
-
-ServerInit automates the complete provisioning of a fresh Ubuntu or Debian server: system hardening, kernel tuning, firewall setup, and stack installation. The result is a production-ready environment with a documented audit trail.
-
-### Requirements
-
-| Requirement | Details |
-|---|---|
-| OS | Ubuntu 20.04 / 22.04 / 24.04, Debian 11 / 12 |
-| Privileges | Root (`sudo`) |
-| Terminal | **Interactive TTY required** — do not run via unattended pipe |
-| Network | Internet access (checked automatically at startup) |
-| Disk | Minimum 5 GB free (checked with a warning) |
-
-### Installation
-
-**Recommended — download, then execute:**
+## ⚡ Quick Start
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh \
   -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh
 ```
 
-**Local execution:**
+> **Why not `curl | bash`?** The script asks three configuration questions.
+> Piping from curl consumes stdin — download first, then run.
+
+**CI / Unattended deploy:**
 
 ```bash
-sudo bash serverinit.sh
+# Docker + full security on port 2222 — zero interaction
+SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
 ```
 
-> **Why not `curl | bash`?**  
-> The script requires interactive keyboard input for three configuration questions.  
-> Piping directly from `curl` consumes the terminal's stdin, making `read` calls fail silently.  
-> Always download the script first, then execute it interactively.
-
 ---
 
-### What the Script Does
+## What It Does
 
-The script runs in four sequential phases.
+Four phases, fully logged, error-trapped, idempotent where possible.
 
-**Phase 0 — System Detection**  
-Reads RAM, CPU, disk, OS version, and IP address. IP detection falls back to `ipinfo.io` on cloud-init images where `hostname -I` returns empty. Calculates the optimal swap size automatically. Aborts immediately if there is no internet connection.
+```
+Phase 0 ── System detection    RAM · CPU · disk · OS · IP · swap calculation
+Phase 1 ── Configuration       3 questions (or env vars in CI mode)
+Phase 2 ── Base system         apt upgrade · utilities · swap · sysctl · fd limits
+Phase 3 ── Security            UFW · fail2ban · SSH hardening · auto-updates
+Phase 4 ── Stack               Docker / Node.js / Python / Base-only
+```
 
-**Phase 1 — Configuration (Three Questions)**
+### Stacks
 
-| Question | Options |
+| # | Stack | What gets installed |
+|---|---|---|
+| 1 | **Docker** | Docker CE, Compose Plugin, Nginx, daemon.json tuning, iptables DOCKER-USER hardening |
+| 2 | **Node.js** | NVM, Node LTS 22, PM2 + systemd startup — under `$SUDO_USER`, not root |
+| 3 | **Python 3** | python3, pip, venv, setuptools, wheel, pipx, Nginx |
+| 4 | **Base only** | System hardening only, no application stack |
+
+### Security Levels
+
+| Level | Includes |
 |---|---|
-| Stack | Docker + Compose + Nginx · Node.js (NVM) + PM2 + Nginx · Python 3 + pip + Nginx · Base utilities only |
-| Security level | Basic (UFW + swap) · Full (+ fail2ban + SSH hardening + auto-updates) |
-| SSH port | Custom port 1024–65535, or keep default 22 (Full security only) |
+| **Basic** | UFW (deny-all + SSH/80/443), swap, sysctl tuning |
+| **Full** | + fail2ban (3 attempts / 24h ban), SSH hardening, custom port, auto security updates, shared memory protection |
 
-**Phase 2 — Base System**
+---
 
-- Full system update (`apt upgrade`) with automatic retry on network failures
-- Essential utilities: `htop`, `nano`, `vim`, `curl`, `wget`, `git`, `jq`, `ncdu`, `iotop`, and more
-- Swap file creation with `fallocate` (dd fallback for incompatible filesystems). If `/swapfile` already exists but is inactive, it is activated without recreation.
-- Kernel tuning via `sysctl`: `somaxconn=65535`, `tcp_syncookies=1`, TCP buffer tuning, SYN flood protection
-- File descriptor limits raised to 1,048,576
+## CI / Unattended Mode
 
-**Phase 3 — Security**
+Pass `--ci` and control everything via environment variables:
 
-- UFW firewall: default deny incoming, allow SSH / 80 / 443. Existing active UFW rules are preserved — rules are added on top rather than reset.
-- **Full mode additionally:**
-  - fail2ban: SSH rate-limiting (3 attempts, 24-hour ban)
-  - SSH hardening: custom port, `MaxAuthTries 3`, `LoginGraceTime 20`, `X11Forwarding no`, `MaxStartups 10:30:60`
-  - Anti-lockout protection: root login disabled only when another sudo user is detected
-  - Smart `PasswordAuthentication`: automatically disabled if `authorized_keys` files are found; kept enabled otherwise with an explicit warning
-  - Unattended security upgrades (security packages only, no automatic reboot)
-  - Shared memory protection (`/dev/shm` with `noexec,nosuid,nodev`)
+| Variable | Default | Description |
+|---|---|---|
+| `SI_STACK` | `1` | Stack: `1`=Docker `2`=Node.js `3`=Python `4`=Base |
+| `SI_SEC` | `1` | Security: `1`=Basic `2`=Full |
+| `SI_SSH_PORT` | `22` | SSH port (1024–65535, only used when `SI_SEC=2`) |
 
-**Phase 4 — Stack**
+**Examples:**
 
-| Stack | Components installed |
+```bash
+# Minimal — base stack + basic security
+SI_STACK=4 SI_SEC=1 sudo bash serverinit.sh --ci
+
+# Node.js + full hardening, default SSH port
+SI_STACK=2 SI_SEC=2 sudo bash serverinit.sh --ci
+
+# Docker + full security + custom SSH port
+SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+```
+
+**Ansible / cloud-init example:**
+
+```yaml
+# cloud-init user-data
+runcmd:
+  - curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh -o /tmp/si.sh
+  - SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 bash /tmp/si.sh --ci
+```
+
+```yaml
+# Ansible task
+- name: Run ServerInit
+  shell: SI_STACK=1 SI_SEC=2 bash /tmp/serverinit.sh --ci
+  environment:
+    SI_STACK: "1"
+    SI_SEC: "2"
+    SI_SSH_PORT: "2222"
+```
+
+---
+
+## Requirements
+
+| | Details |
 |---|---|
-| Docker | Docker CE, Docker Compose Plugin, Nginx, `daemon.json` tuning (log rotation 10 MB × 3, ulimits), iptables DOCKER-USER chain hardening |
-| Node.js | NVM, Node.js LTS, PM2 with systemd startup — all installed under the invoking user (`$SUDO_USER`), not root |
-| Python 3 | python3, pip, venv, setuptools, wheel, pipx, Nginx |
-| Base | No additional stack — base utilities and security only |
-
-**Output**
-
-- Full installation log: `/root/serverinit_YYYYMMDD_HHMMSS.log`
-- Summary report with next steps: `/root/serverinit_report.txt`
-- On any failure: exit code, last log lines, and the log path are printed to stderr
+| OS | Ubuntu 20.04 / 22.04 / 24.04 · Debian 11 / 12 |
+| Privileges | Root (`sudo`) |
+| Terminal | Interactive TTY required for normal mode; not required with `--ci` |
+| Network | Internet access (checked at startup, aborts early if absent) |
+| Disk | Minimum 5 GB free (swap size is auto-reduced if space is tight) |
 
 ---
 
-### Security Design Decisions
+## Security Design
 
-**SSH service name is portable.** The script uses a `restart_ssh()` function that tries `systemctl restart ssh`, then `sshd`, then the legacy `service` command. Ubuntu and Debian name the service differently; a hardcoded `sshd` silently fails on half of Debian installs.
+**SSH service name is portable.**
+Uses `restart_ssh()` that tries `systemctl restart ssh`, then `sshd`, then legacy `service`. Ubuntu and Debian name the daemon differently; a hardcoded name silently fails on half of Debian installs.
 
-**`PasswordAuthentication` is decided at runtime.** The script inspects `authorized_keys` files across all home directories. If SSH keys are already deployed, password authentication is disabled automatically. If not, it stays enabled with a prominent warning and the exact commands to disable it after key deployment.
+**`PasswordAuthentication` is decided at runtime.**
+Inspects `authorized_keys` across all home directories. Keys deployed → password auth disabled automatically. No keys → stays enabled with a prominent warning and exact commands to disable it later.
 
-**SSH config is validated before applying.** `sshd -t` runs before every restart. On failure, the original config is restored from a timestamped backup.
+**SSH config is validated before applying.**
+`sshd -t` runs before every restart. On failure, the original is restored from a timestamped backup.
 
-**Root login is conditional.** The script checks for existing sudo-group members before disabling root login. On a fresh server with no other users, root access is preserved.
+**Root login is conditional.**
+Counts sudo-group members first. On a fresh single-user server, root access is preserved rather than locking you out.
 
-**UFW reset is conditional.** If UFW is already active (existing custom rules), the script adds new rules on top rather than resetting. A `--force reset` only runs on a clean UFW state.
+**UFW reset is conditional.**
+If UFW is already active, rules are added on top — no reset, no wiping existing custom rules.
 
-**Docker + UFW iptables bypass is addressed.** Docker inserts rules directly into the kernel's `iptables` and bypasses UFW entirely when containers publish ports. The script inserts a `DROP` rule into the `DOCKER-USER` chain and then explicitly allows SSH/80/443, so published container ports are not reachable from the internet unless you deliberately open them. Rules are persisted via `iptables-persistent`.
+**Docker + UFW iptables bypass is addressed.**
+Docker bypasses UFW by writing directly to iptables. The script inserts a `DROP` rule into the `DOCKER-USER` chain, then explicitly re-opens SSH/80/443, so container ports are only reachable when you deliberately allow them. Persisted via `iptables-persistent`.
 
-**NVM is installed under the real user, not root.** When invoked via `sudo`, `$SUDO_USER` contains the invoking username. NVM, Node.js, and PM2 are installed into that user's home directory. The system-wide `/etc/profile.d/nvm.sh` points to the correct path.
+**NVM is installed under the real user, not root.**
+`$SUDO_USER` holds the invoking username. NVM, Node.js, and PM2 go into that user's home directory. `/etc/profile.d/nvm.sh` points to the right path.
 
-**`apt` operations use retry with exponential backoff.** Up to 3 attempts, starting at 5 s delay, doubling each time. Covers transient package mirror failures common on newly provisioned VPS instances.
+**Swap respects available disk space.**
+The RAM-based swap size is capped so at least 5 GB of free disk always remains after creation — no surprise "no space left" failures mid-install.
 
-**Error handling via `trap`.** `trap cleanup EXIT` catches any `set -e` abort and prints the exit code, the last 5 lines of the log, and the log path. The server is never left in an unknown state without a hint.
+**`apt` uses retry with exponential backoff.**
+Up to 3 attempts, 5 s → 10 s → 20 s delay. Covers transient mirror failures common on newly provisioned VPS instances.
+
+**Error trap on every exit.**
+`trap cleanup EXIT` catches any `set -e` abort, prints exit code + last 5 log lines + log path. The server is never left in an unknown state without a diagnostic.
 
 ---
 
-### Testing Across Environments
+## Testing
 
-**Local VM (recommended before production use):**
+### Run tests locally
+
+```bash
+bash tests/test_serverinit.sh ./serverinit.sh
+```
+
+```
+▶ Swap — RAM-based calculation (unlimited disk)
+  ✔  RAM  512 MB → Swap 2 GB
+  ✔  RAM 1024 MB → Swap 2 GB
+  ✔  RAM 4096 MB → Swap 4 GB
+  ✔  RAM 16 GB   → Swap 0 GB (no swap needed)
+
+▶ Swap — Smart disk limiter
+  ✔  Disk 7 GB, RAM 4 GB → Swap 2 GB (7-5=2, capped)
+  ✔  Disk 5 GB, RAM 4 GB → Swap 0 GB (no room)
+  ✔  Disk 3 GB, RAM 4 GB → Swap 0 GB (negative → 0)
+
+▶ CI mode — env var validation
+  ✔  Valid: STACK=1 SEC=1 PORT=22
+  ✔  Invalid: STACK=5 rejected
+  ✔  Invalid: PORT=80 rejected (<1024)
+
+▶ SSH port — boundary validation
+  ✔  Port 22 rejected (< 1024)
+  ✔  Port 65536 rejected (> 65535)
+
+▶ Script integrity
+  ✔  Syntax check passed (bash -n)
+  ✔  --ci flag present in script
+  ✔  Disk limiter present
+
+  Tests: 37  passed: 36  skipped: 1
+  ✔ All tests passed
+```
+
+CI runs on every push via GitHub Actions — ShellCheck + full test suite on Ubuntu 22.04.
+
+### Test on a VM before production
 
 ```bash
 multipass launch 22.04 --name test-server
@@ -133,60 +222,83 @@ multipass shell test-server
 curl -fsSL <URL> -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh
 ```
 
-**Docker container (functional test — no systemd):**
+### Verify after install
 
 ```bash
-docker run -it --rm ubuntu:22.04 bash
-apt-get update -qq && apt-get install -y -qq curl sudo
-# Script will fail at systemctl calls — expected in containers
-```
-
-**Verify UFW rules:**
-
-```bash
-ufw status verbose
-```
-
-**Verify sysctl changes:**
-
-```bash
-sysctl net.core.somaxconn
-sysctl vm.swappiness
-```
-
-**Verify fail2ban (full mode):**
-
-```bash
-fail2ban-client status sshd
-```
-
-**Verify Docker + iptables:**
-
-```bash
-docker run --rm hello-world
-iptables -L DOCKER-USER -n --line-numbers
+ufw status verbose                         # firewall rules
+sysctl net.core.somaxconn vm.swappiness   # kernel tuning
+fail2ban-client status sshd               # fail2ban (full mode)
+iptables -L DOCKER-USER -n --line-numbers # Docker chain (Docker stack)
+cat /root/serverinit_report.txt           # full install report
 ```
 
 ---
 
-### Post-Installation Checklist
+## Post-Installation Checklist
 
-- [ ] Test SSH access on the new port before closing the current session
-- [ ] If password auth is still enabled: deploy SSH keys, then disable it per the report instructions
-- [ ] Configure DNS and obtain SSL certificates: `certbot --nginx -d yourdomain.com`
-- [ ] For Docker: open additional ports in **both** UFW and iptables DOCKER-USER:  
+- [ ] Test SSH access on the new port **before** closing the current session
+- [ ] If password auth is still enabled: deploy SSH keys, then disable per the report instructions
+- [ ] Configure DNS and obtain SSL: `certbot --nginx -d yourdomain.com`
+- [ ] For Docker — open additional ports in **both** UFW and iptables:
   ```bash
   ufw allow PORT/tcp
   iptables -I DOCKER-USER -p tcp --dport PORT -j ACCEPT
   netfilter-persistent save
   ```
-- [ ] Review the report: `cat /root/serverinit_report.txt`
-- [ ] Reboot to apply kernel parameters and limits: `sudo reboot`
+- [ ] Review the full report: `cat /root/serverinit_report.txt`
+- [ ] Reboot to apply kernel parameters: `sudo reboot`
+
+---
+
+## Output Files
+
+| File | Description |
+|---|---|
+| `/root/serverinit_YYYYMMDD_HHMMSS.log` | Full installation log (last 5 kept, older auto-deleted) |
+| `/root/serverinit_report.txt` | Summary with configuration and next steps |
+
+---
+
+## Changelog
+
+**v3.1.0**
+- Added: `--ci` unattended mode with `SI_STACK` / `SI_SEC` / `SI_SSH_PORT` env vars
+- Added: Smart swap disk limiter — swap size auto-reduced to keep ≥5 GB free on disk
+- Added: CI/CD pipeline (GitHub Actions) — ShellCheck + 36-test suite on push
+- Added: `tests/test_serverinit.sh` covering swap logic, CI validation, SSH port rules, script integrity
+
+**v3.0.0**
+- Fixed: `systemctl restart sshd` → portable `restart_ssh()` (tries `ssh`, `sshd`, legacy `service`)
+- Fixed: `ufw --force reset` skipped if UFW is already active — existing rules preserved
+- Fixed: NVM and PM2 installed under `$SUDO_USER` instead of root
+- Fixed: `PasswordAuthentication` decided at runtime via `authorized_keys` inspection
+- Fixed: Docker + UFW iptables bypass addressed via DOCKER-USER chain + `iptables-persistent`
+- Fixed: Existing inactive `/swapfile` activated in place, not recreated
+- Fixed: `hostname -I` empty output falls back to `curl ipinfo.io/ip`
+- Fixed: `clear` guarded with `[[ -t 1 ]]` — CI logs no longer broken
+- Added: `retry()` with exponential backoff on all `apt` operations
+- Added: Internet connectivity check at startup
+- Added: `trap cleanup EXIT` — exit code + last log lines on any failure
+- Added: Disk space warning below 5 GB
 
 ---
 
 <a name="russian"></a>
+
 ## Русский
+
+### Быстрый старт
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh \
+  -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh
+```
+
+**CI / автоматический деплой:**
+
+```bash
+SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+```
 
 ### Описание
 
@@ -198,9 +310,9 @@ ServerInit автоматизирует полную настройку ново
 |---|---|
 | ОС | Ubuntu 20.04 / 22.04 / 24.04, Debian 11 / 12 |
 | Привилегии | Root (`sudo`) |
-| Терминал | **Требуется интерактивный TTY** — запуск через pipe не поддерживается |
-| Сеть | Доступ в интернет (проверяется автоматически при старте) |
-| Диск | Минимум 5 GB свободного места (проверяется с предупреждением) |
+| Терминал | Интерактивный TTY для обычного режима; не нужен при `--ci` |
+| Сеть | Доступ в интернет (проверяется при старте) |
+| Диск | Минимум 5 GB (размер swap авто-уменьшается при нехватке места) |
 
 ### Установка
 
@@ -217,164 +329,109 @@ curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serv
 sudo bash serverinit.sh
 ```
 
-> **Почему не `curl | bash`?**  
-> Скрипт требует интерактивного ввода для трёх вопросов конфигурации.  
-> При прямом pipe из `curl` stdin терминала занят потоком данных — вызовы `read` возвращают пустую строку, что приводит к бесконечному циклу валидации.  
-> Всегда сначала скачивайте скрипт, затем запускайте интерактивно.
+> **Почему не `curl | bash`?** Скрипт задаёт три вопроса. Pipe из curl занимает stdin — сначала скачай, потом запускай.
 
----
+### CI / Массовый деплой
+
+Флаг `--ci` отключает интерактив и читает параметры из переменных окружения:
+
+| Переменная | По умолчанию | Описание |
+|---|---|---|
+| `SI_STACK` | `1` | Стек: `1`=Docker `2`=Node.js `3`=Python `4`=Базовый |
+| `SI_SEC` | `1` | Безопасность: `1`=Базовый `2`=Полный |
+| `SI_SSH_PORT` | `22` | SSH-порт (1024–65535, только при `SI_SEC=2`) |
+
+```bash
+# Docker + полная безопасность на порту 2222
+SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+```
 
 ### Что делает скрипт
 
-Скрипт выполняется в четырёх последовательных фазах.
+**Фаза 0 — Определение системы**
+Считывает RAM, CPU, диск, ОС, IP. При нехватке интернета завершается немедленно.
+Swap рассчитывается автоматически с учётом доступного места на диске.
 
-**Фаза 0 — Определение системы**  
-Считывает RAM, CPU, диск, версию ОС и IP-адрес. Если `hostname -I` возвращает пустую строку (cloud-init), IP получается через `ipinfo.io`. Автоматически рассчитывает оптимальный размер swap. При отсутствии интернета завершается немедленно.
-
-**Фаза 1 — Конфигурация (три вопроса)**
+**Фаза 1 — Конфигурация**
 
 | Вопрос | Варианты |
 |---|---|
-| Стек | Docker + Compose + Nginx · Node.js (NVM) + PM2 + Nginx · Python 3 + pip + Nginx · Только базовые утилиты |
-| Уровень безопасности | Базовый (UFW + swap) · Полный (+ fail2ban + SSH hardening + автообновления) |
+| Стек | Docker + Compose + Nginx · Node.js + PM2 + Nginx · Python 3 + pip + Nginx · Только утилиты |
+| Безопасность | Базовый (UFW + swap) · Полный (+ fail2ban + SSH hardening + автообновления) |
 | SSH порт | Нестандартный порт 1024–65535 или оставить 22 (только в полном режиме) |
 
 **Фаза 2 — Базовая система**
 
-- Полное обновление системы (`apt upgrade`) с автоматическим retry при сетевых ошибках
+- Полное обновление (`apt upgrade`) с автоматическим retry при сетевых ошибках
 - Базовые утилиты: `htop`, `nano`, `vim`, `curl`, `wget`, `git`, `jq`, `ncdu`, `iotop` и другие
-- Создание swap через `fallocate` (fallback на `dd`). Если `/swapfile` уже существует, но не активен — активируется без пересоздания.
-- Оптимизация ядра через `sysctl`: `somaxconn=65535`, `tcp_syncookies=1`, тюнинг TCP-буферов, защита от SYN flood
-- Лимиты файловых дескрипторов увеличены до 1 048 576
+- Swap через `fallocate` (fallback на `dd`). Существующий неактивный файл — активируется без пересоздания
+- Оптимизация ядра: `somaxconn=65535`, `tcp_syncookies=1`, тюнинг TCP, защита от SYN flood
+- Лимиты файловых дескрипторов: 1 048 576
 
 **Фаза 3 — Безопасность**
 
-- UFW: запрет входящих по умолчанию, разрешить SSH / 80 / 443. Если UFW уже активен — правила добавляются поверх существующих без сброса.
-- **Только в полном режиме:**
-  - fail2ban: rate-limit SSH (3 попытки, бан 24 часа)
-  - SSH hardening: нестандартный порт, `MaxAuthTries 3`, `LoginGraceTime 20`, `X11Forwarding no`, `MaxStartups 10:30:60`
+- UFW: запрет входящих, разрешить SSH/80/443. Если UFW уже активен — правила добавляются поверх, без сброса
+- **Полный режим дополнительно:**
+  - fail2ban: 3 попытки / бан 24 часа
+  - SSH hardening: порт, `MaxAuthTries 3`, `LoginGraceTime 20`, `X11Forwarding no`
   - Защита от блокировки: root login отключается только при наличии другого sudo-пользователя
-  - Умный `PasswordAuthentication`: автоматически отключается если найдены `authorized_keys`; остаётся включённым с предупреждением если ключи не найдены
-  - Автообновления безопасности (только security-пакеты, без автоперезагрузки)
-  - Защита shared memory (`/dev/shm` с флагами `noexec,nosuid,nodev`)
+  - `PasswordAuthentication` — авто-решение по наличию `authorized_keys`
+  - Автообновления безопасности (только security, без авто-ребута)
+  - Защита `/dev/shm` (`noexec,nosuid,nodev`)
 
 **Фаза 4 — Стек**
 
 | Стек | Что устанавливается |
 |---|---|
-| Docker | Docker CE, Docker Compose Plugin, Nginx, `daemon.json` (ротация логов 10 МБ × 3, ulimits), защита цепочки iptables DOCKER-USER |
-| Node.js | NVM, Node.js LTS, PM2 с автозапуском через systemd — всё устанавливается от имени вызывающего пользователя (`$SUDO_USER`), а не root |
+| Docker | Docker CE, Compose Plugin, Nginx, daemon.json, защита DOCKER-USER iptables |
+| Node.js | NVM, Node LTS 22, PM2 + systemd — от имени `$SUDO_USER`, не root |
 | Python 3 | python3, pip, venv, setuptools, wheel, pipx, Nginx |
-| Базовый | Дополнительный стек не устанавливается |
-
-**Результат**
-
-- Полный лог установки: `/root/serverinit_YYYYMMDD_HHMMSS.log`
-- Отчёт с итогами и следующими шагами: `/root/serverinit_report.txt`
-- При любой ошибке: код выхода, последние строки лога и путь к логу выводятся в stderr
-
----
-
-### Проектные решения по безопасности
-
-**Перезапуск SSH — переносимый.** Используется функция `restart_ssh()`, которая последовательно пробует `systemctl restart ssh`, затем `sshd`, затем legacy-команду `service`. Ubuntu и Debian называют сервис по-разному; хардкод `sshd` молча падает на половине Debian-инсталляций.
-
-**`PasswordAuthentication` определяется в рантайме.** Скрипт проверяет наличие `authorized_keys` во всех домашних директориях. Если SSH-ключи уже задеплоены — парольная аутентификация отключается автоматически. Если нет — остаётся включённой с явным предупреждением и командами для отключения после деплоя ключей.
-
-**SSH-конфиг валидируется перед применением.** `sshd -t` выполняется перед каждым перезапуском. При ошибке конфиг восстанавливается из бэкапа с временной меткой.
-
-**Root login — условно.** Скрипт проверяет наличие других членов группы sudo перед отключением root-входа. На чистом сервере без других пользователей root-доступ сохраняется.
-
-**UFW reset — условный.** Если UFW уже активен (есть кастомные правила), скрипт добавляет новые правила поверх. `--force reset` выполняется только на чистом UFW.
-
-**Docker + UFW: проблема iptables-bypass решена.** Docker вставляет правила напрямую в ядро iptables, полностью обходя UFW при публикации портов контейнеров. Скрипт вставляет DROP-правило в цепочку DOCKER-USER и явно разрешает SSH/80/443, так что опубликованные порты контейнеров недоступны из интернета пока не будут явно открыты. Правила сохраняются через `iptables-persistent`.
-
-**NVM устанавливается под реального пользователя, не root.** При вызове через `sudo` в `$SUDO_USER` содержится имя вызывающего пользователя. NVM, Node.js и PM2 устанавливаются в домашнюю директорию этого пользователя. Системный `/etc/profile.d/nvm.sh` указывает на правильный путь.
-
-**Операции `apt` используют retry с экспоненциальным backoff.** До 3 попыток, начиная с задержки 5 с с удвоением. Покрывает временные сбои зеркал пакетов, типичные для только что поднятых VPS.
-
-**Обработка ошибок через `trap`.** `trap cleanup EXIT` перехватывает любой abort от `set -e` и печатает код выхода, последние 5 строк лога и путь к логу. Сервер никогда не остаётся в неизвестном состоянии без подсказки.
-
----
+| Базовый | Только хардинг, без стека |
 
 ### Тестирование
 
-**Локальная VM (рекомендуется перед production):**
-
 ```bash
-multipass launch 22.04 --name test-server
-multipass shell test-server
-curl -fsSL <URL> -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh
+bash tests/test_serverinit.sh ./serverinit.sh
 ```
 
-**Docker-контейнер (только функциональный тест — без systemd):**
+CI автоматически запускает ShellCheck + 36 тестов на каждый push.
 
-```bash
-docker run -it --rm ubuntu:22.04 bash
-apt-get update -qq && apt-get install -y -qq curl sudo
-# Скрипт завершится ошибкой на командах systemctl — ожидаемое поведение
-```
-
-**Проверка UFW:**
+**Проверки после установки:**
 
 ```bash
 ufw status verbose
+sysctl net.core.somaxconn vm.swappiness
+fail2ban-client status sshd              # полный режим
+iptables -L DOCKER-USER -n --line-numbers  # Docker стек
+cat /root/serverinit_report.txt
 ```
-
-**Проверка sysctl:**
-
-```bash
-sysctl net.core.somaxconn
-sysctl vm.swappiness
-```
-
-**Проверка fail2ban (полный режим):**
-
-```bash
-fail2ban-client status sshd
-```
-
-**Проверка Docker + iptables:**
-
-```bash
-docker run --rm hello-world
-iptables -L DOCKER-USER -n --line-numbers
-```
-
----
 
 ### Чеклист после установки
 
 - [ ] Проверить SSH-доступ на новом порту, не закрывая текущую сессию
-- [ ] Если парольный вход оставлен: задеплоить SSH-ключи, затем отключить пароль по инструкции из отчёта
-- [ ] Настроить DNS и получить SSL-сертификат: `certbot --nginx -d yourdomain.com`
-- [ ] Для Docker: открывать порты **одновременно** в UFW и iptables DOCKER-USER:  
+- [ ] Если парольный вход оставлен: задеплоить SSH-ключи, затем отключить по инструкции из отчёта
+- [ ] DNS + SSL: `certbot --nginx -d yourdomain.com`
+- [ ] Docker: открывать порты одновременно в UFW **и** iptables DOCKER-USER:
   ```bash
   ufw allow PORT/tcp
   iptables -I DOCKER-USER -p tcp --dport PORT -j ACCEPT
   netfilter-persistent save
   ```
 - [ ] Просмотреть отчёт: `cat /root/serverinit_report.txt`
-- [ ] Перезагрузить сервер для применения параметров ядра: `sudo reboot`
+- [ ] Перезагрузить сервер: `sudo reboot`
+
+### Проектные решения
+
+**Перезапуск SSH — переносимый.** `restart_ssh()` пробует `ssh`, `sshd`, legacy `service` по очереди. Ubuntu и Debian называют демон по-разному.
+
+**`PasswordAuthentication` — рантайм-решение.** Проверяет `authorized_keys` во всех домашних директориях. Ключи есть → пароль отключается автоматически.
+
+**SSH-конфиг валидируется.** `sshd -t` перед каждым перезапуском. При ошибке — откат на бэкап с временной меткой.
+
+**Swap учитывает диск.** Размер ограничивается так, чтобы всегда оставалось ≥5 GB свободного места.
+
+**Обработка ошибок через trap.** `trap cleanup EXIT` — код выхода, последние строки лога и путь к файлу при любом сбое.
 
 ---
 
-### Changelog
-
-**v3.0.0**
-- Fixed: `systemctl restart sshd` replaced with portable `restart_ssh()` (tries `ssh`, `sshd`, legacy `service`)
-- Fixed: `ufw --force reset` now skipped if UFW is already active — custom rules are preserved
-- Fixed: NVM and PM2 installed under `$SUDO_USER` instead of root; `/etc/profile.d/nvm.sh` points to the correct home directory
-- Fixed: `PasswordAuthentication` is now decided at runtime by inspecting `authorized_keys` files instead of being hardcoded to `yes`
-- Fixed: Docker + UFW iptables bypass addressed via DOCKER-USER chain DROP rule with `iptables-persistent` for persistence across reboots
-- Fixed: `/swapfile` existing but inactive no longer triggers recreation — it is activated in place
-- Fixed: `hostname -I` empty output now falls back to `curl ipinfo.io/ip`
-- Fixed: bare `clear` replaced with `[[ -t 1 ]] && clear` to avoid breaking CI logs and terminal multiplexers
-- Added: `retry()` wrapper with exponential backoff applied to all `apt` operations
-- Added: internet connectivity check at startup (aborts early instead of failing mid-install)
-- Added: `trap cleanup EXIT` — prints exit code and last log lines on any failure
-- Added: disk space warning when free space is below 5 GB
-
----
-
-*Created by Franklin · MIT License*
+*Created by [Franklin](https://franklin-sys.vercel.app) · MIT License*

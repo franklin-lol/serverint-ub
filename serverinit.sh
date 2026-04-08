@@ -266,6 +266,7 @@ ok "Система обновлена"
 # ── Essential tools ───────────────────────────────────────────────────────────
 step "Установка базовых утилит"
 retry apt-get install -y -qq \
+  openssh-server \
   htop nano vim curl wget git unzip zip \
   net-tools dnsutils traceroute \
   ca-certificates gnupg lsb-release \
@@ -418,54 +419,59 @@ EOF
   # SSH hardening
   info "Hardening SSH..."
   SSH_CFG="/etc/ssh/sshd_config"
-  SSH_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
-  cp "$SSH_CFG" "$SSH_BACKUP"
 
-  sed -i "s/^#*Port .*/Port $SSH_PORT/" "$SSH_CFG"
-
-  # Anti-lockout: only disable root login if another sudo user exists
-  SUDO_USERS_COUNT=$(getent group sudo 2>/dev/null | cut -d: -f4 \
-    | tr ',' '\n' | grep -vc "^$" || echo 0)
-  if [[ $SUDO_USERS_COUNT -gt 0 || -n "${SUDO_USER:-}" ]]; then
-    sed -i "s/^#*PermitRootLogin .*/PermitRootLogin no/" "$SSH_CFG"
-    ok "Root login отключён (найден пользователь с sudo)"
+  if [[ ! -f "$SSH_CFG" ]]; then
+    warn "Конфиг $SSH_CFG не найден — пропускаем Hardening SSH"
   else
-    warn "Root login ОСТАВЛЕН — нет других sudo-пользователей. Создай пользователя вручную!"
-  fi
+    SSH_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
+    cp "$SSH_CFG" "$SSH_BACKUP"
 
-  # Smart PasswordAuthentication: disable only if authorized_keys already exist
-  HAS_KEYS=0
-  for key_file in /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys; do
-    [[ -s "$key_file" ]] && HAS_KEYS=1 && break
-  done
-  if [[ $HAS_KEYS -eq 1 ]]; then
-    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSH_CFG"
-    ok "SSH ключи найдены — парольная аутентификация отключена"
-  else
-    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CFG"
-    warn "SSH ключи не найдены — парольный вход оставлен. Задеплой ключи и отключи вручную!"
-  fi
+    sed -i "s/^#*Port .*/Port $SSH_PORT/" "$SSH_CFG"
 
-  sed -i "s/^#*MaxAuthTries .*/MaxAuthTries 3/"      "$SSH_CFG"
-  sed -i "s/^#*LoginGraceTime .*/LoginGraceTime 20/" "$SSH_CFG"
-  sed -i "s/^#*X11Forwarding .*/X11Forwarding no/"   "$SSH_CFG"
+    # Anti-lockout: only disable root login if another sudo user exists
+    SUDO_USERS_COUNT=$(getent group sudo 2>/dev/null | cut -d: -f4 \
+      | tr ',' '\n' | grep -vc "^$" || echo 0)
+    if [[ $SUDO_USERS_COUNT -gt 0 || -n "${SUDO_USER:-}" ]]; then
+      sed -i "s/^#*PermitRootLogin .*/PermitRootLogin no/" "$SSH_CFG"
+      ok "Root login отключён (найден пользователь с sudo)"
+    else
+      warn "Root login ОСТАВЛЕН — нет других sudo-пользователей. Создай пользователя вручную!"
+    fi
 
-  grep -q "^ClientAliveInterval" "$SSH_CFG" || echo "ClientAliveInterval 300" >> "$SSH_CFG"
-  grep -q "^ClientAliveCountMax" "$SSH_CFG" || echo "ClientAliveCountMax 2"   >> "$SSH_CFG"
-  grep -q "^MaxStartups"         "$SSH_CFG" || echo "MaxStartups 10:30:60"    >> "$SSH_CFG"
+    # Smart PasswordAuthentication: disable only if authorized_keys already exist
+    HAS_KEYS=0
+    for key_file in /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys; do
+      [[ -s "$key_file" ]] && HAS_KEYS=1 && break
+    done
+    if [[ $HAS_KEYS -eq 1 ]]; then
+      sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSH_CFG"
+      ok "SSH ключи найдены — парольная аутентификация отключена"
+    else
+      sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CFG"
+      warn "SSH ключи не найдены — парольный вход оставлен. Задеплой ключи и отключи вручную!"
+    fi
 
-  # Validate → apply or rollback
-  if /usr/sbin/sshd -t 2>/dev/null; then
-    restart_ssh
-    ok "SSH hardened: порт $SSH_PORT"
-  else
-    warn "sshd_config невалиден — откатываем конфиг"
-    cp "$SSH_BACKUP" "$SSH_CFG"
+    sed -i "s/^#*MaxAuthTries .*/MaxAuthTries 3/"      "$SSH_CFG"
+    sed -i "s/^#*LoginGraceTime .*/LoginGraceTime 20/" "$SSH_CFG"
+    sed -i "s/^#*X11Forwarding .*/X11Forwarding no/"   "$SSH_CFG"
+
+    grep -q "^ClientAliveInterval" "$SSH_CFG" || echo "ClientAliveInterval 300" >> "$SSH_CFG"
+    grep -q "^ClientAliveCountMax" "$SSH_CFG" || echo "ClientAliveCountMax 2"   >> "$SSH_CFG"
+    grep -q "^MaxStartups"         "$SSH_CFG" || echo "MaxStartups 10:30:60"    >> "$SSH_CFG"
+
+    # Validate → apply or rollback
     if /usr/sbin/sshd -t 2>/dev/null; then
       restart_ssh
-      warn "SSH восстановлен из бэкапа $SSH_BACKUP"
+      ok "SSH hardened: порт $SSH_PORT"
     else
-      warn "SSH конфиг повреждён! Проверь вручную: sshd -t"
+      warn "sshd_config невалиден — откатываем конфиг"
+      cp "$SSH_BACKUP" "$SSH_CFG"
+      if /usr/sbin/sshd -t 2>/dev/null; then
+        restart_ssh
+        warn "SSH восстановлен из бэкапа $SSH_BACKUP"
+      else
+        warn "SSH конфиг повреждён! Проверь вручную: sshd -t"
+      fi
     fi
   fi
 

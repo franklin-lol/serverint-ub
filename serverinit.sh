@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║           ServerInit — Universal Server Setup Utility           ║
-# ║                    by Elite Tech Collective                     ║
+# ║                         by Franklin                             ║
 # ╚══════════════════════════════════════════════════════════════════╝
 # Usage (interactive only — must have a real TTY):
 #   sudo bash serverinit.sh
@@ -14,7 +14,7 @@ set -euo pipefail
 
 # ── Versions (update here only) ───────────────────────────────────────────────
 NVM_VERSION="0.40.1"
-NODE_LTS="22"          # current LTS; use "lts/*" for always-latest
+NODE_LTS="22"
 
 # ── ANSI palette ─────────────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m'
@@ -30,29 +30,94 @@ step() { echo -e "\n${BOLD}${B}▶ $*${NC}"; }
 sep()  { echo -e "${DIM}────────────────────────────────────────────${NC}"; }
 
 # ── Preflight ─────────────────────────────────────────────────────────────────
-[[ $EUID -ne 0 ]]           && err "Run as root:  sudo bash serverinit.sh"
+[[ $EUID -ne 0 ]]              && err "Run as root:  sudo bash serverinit.sh"
 [[ ! -f /etc/debian_version ]] && err "Debian/Ubuntu only (apt required)"
 
-# FIX: Detect TTY before any interactive input.
-# curl|bash pipes stdin → /dev/tty reads return empty string immediately
+# TTY detection: curl|bash pipes stdin → /dev/tty reads return empty string
 # causing infinite validation loops. Require a real terminal.
 if [[ ! -e /dev/tty ]]; then
   err "Требуется интерактивный терминал.\nИспользуйте: curl -fsSL URL -o /tmp/serverinit.sh && sudo bash /tmp/serverinit.sh"
 fi
-# Verify /dev/tty is actually readable (not just present)
 if ! ( exec < /dev/tty ) 2>/dev/null; then
   err "Нет доступа к /dev/tty.\nСкачайте скрипт и запустите напрямую: sudo bash serverinit.sh"
 fi
 
 LOG_FILE="/root/serverinit_$(date +%Y%m%d_%H%M%S).log"
-# FIX: Use pipe to file and keep original stdout for user output.
-# exec > >(tee) + set -e causes race conditions on bash < 5.1
-# Solution: log via explicit redirection in functions, tee only non-interactive output.
-exec 3>&1                          # fd3 = original stdout (terminal)
-exec > >(tee -a "$LOG_FILE") 2>&1  # fd1/fd2 → tee (file + terminal)
+exec 3>&1
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UTILITY FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Safe interactive read — prompt via /dev/tty, read from /dev/tty.
+# Avoids 'read -p' prompt disappearing when stdout is redirected to tee.
+ask() {
+  local var_name="$1" prompt="$2" val
+  printf "%s" "$prompt" > /dev/tty
+  read -r val < /dev/tty || err "Не удалось прочитать ввод с терминала"
+  printf -v "$var_name" '%s' "$val"
+}
+
+# Retry wrapper: up to 3 attempts with exponential backoff.
+# Covers transient network failures during apt operations.
+retry() {
+  local n=3 delay=5 attempt=1
+  until "$@"; do
+    [[ $attempt -ge $n ]] && err "Не удалось выполнить после $n попыток: $*"
+    warn "Попытка $attempt/$n не удалась, повтор через ${delay}с..."
+    sleep "$delay"
+    delay=$((delay * 2))
+    attempt=$((attempt + 1))
+  done
+}
+
+# Portable SSH service restart: Ubuntu uses 'ssh', Debian uses 'sshd',
+# some systems only have the legacy 'service' command.
+restart_ssh() {
+  systemctl restart ssh   2>/dev/null && return 0
+  systemctl restart sshd  2>/dev/null && return 0
+  service   ssh   restart 2>/dev/null && return 0
+  service   sshd  restart 2>/dev/null && return 0
+  warn "Не удалось перезапустить SSH — перезапусти вручную: systemctl restart ssh"
+  return 1
+}
+
+# Nginx install helper — idempotent, called by stack installers.
+install_nginx() {
+  if ! command -v nginx &>/dev/null; then
+    info "Устанавливаем Nginx..."
+    retry apt-get install -y -qq nginx > /dev/null 2>&1
+    systemctl enable nginx > /dev/null 2>&1
+    systemctl start  nginx > /dev/null 2>&1
+    sed -i "s/^worker_processes .*/worker_processes auto;/" /etc/nginx/nginx.conf
+    ok "Nginx установлен и запущен"
+  else
+    ok "Nginx уже установлен"
+  fi
+}
+
+# Trap: show where the script died and point to the log.
+cleanup() {
+  local code=$?
+  [[ $code -eq 0 ]] && return
+  echo -e "\n${R}  ✖  Установка прервана (код выхода: $code)${NC}" >&2
+  echo -e "  Лог: $LOG_FILE" >&2
+  echo -e "  Последние строки:" >&2
+  tail -5 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' >&2 || true
+}
+trap cleanup EXIT
+
+# ── Internet check ─────────────────────────────────────────────────────────────
+info "Проверяем сетевое соединение..."
+if ! curl -fsSL --max-time 5 https://1.1.1.1 > /dev/null 2>&1 \
+   && ! ping -c1 -W3 1.1.1.1 > /dev/null 2>&1; then
+  err "Нет интернет-соединения. Проверь сеть и повтори."
+fi
+ok "Сеть доступна"
 
 # ── Banner ────────────────────────────────────────────────────────────────────
-clear
+[[ -t 1 ]] && clear
 echo -e "${BOLD}${M}"
 cat << 'EOF'
   ███████╗███████╗██████╗ ██╗   ██╗███████╗██████╗
@@ -69,7 +134,7 @@ cat << 'EOF'
           ╚═╝╚═╝  ╚═══╝╚═╝   ╚═╝
 EOF
 echo -e "${NC}"
-echo -e "${DIM}  Universal Server Setup Utility  ·  by Elite Tech Collective${NC}"
+echo -e "${DIM}  Universal Server Setup Utility  ·  by Franklin${NC}"
 sep
 echo ""
 
@@ -81,17 +146,27 @@ CPU_CORES=$(nproc)
 DISK_FREE_GB=$(df / --output=avail -BG | tail -1 | tr -d 'G ')
 HOSTNAME_VAL=$(hostname)
 OS_NAME=$(grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
-IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "n/a")
+
+# hostname -I returns empty on some cloud-init images — fallback to public IP
+IP_ADDR=$(hostname -I 2>/dev/null | awk '{print $1}')
+if [[ -z "$IP_ADDR" ]]; then
+  IP_ADDR=$(curl -fsSL --max-time 5 https://ipinfo.io/ip 2>/dev/null || echo "n/a")
+fi
 
 echo -e "${BOLD}  System snapshot${NC}"
 sep
-printf "  %-18s %s\n"        "OS:"       "$OS_NAME"
-printf "  %-18s %s\n"        "Hostname:" "$HOSTNAME_VAL"
-printf "  %-18s %s\n"        "IP:"       "$IP_ADDR"
-printf "  %-18s %s MB\n"    "RAM:"       "$TOTAL_RAM_MB"
-printf "  %-18s %s cores\n" "CPU:"       "$CPU_CORES"
-printf "  %-18s %s GB free\n" "Disk:"    "$DISK_FREE_GB"
+printf "  %-18s %s\n"         "OS:"       "$OS_NAME"
+printf "  %-18s %s\n"         "Hostname:" "$HOSTNAME_VAL"
+printf "  %-18s %s\n"         "IP:"       "$IP_ADDR"
+printf "  %-18s %s MB\n"     "RAM:"       "$TOTAL_RAM_MB"
+printf "  %-18s %s cores\n"  "CPU:"       "$CPU_CORES"
+printf "  %-18s %s GB free\n" "Disk:"     "$DISK_FREE_GB"
 sep
+
+# ── Disk space guard ──────────────────────────────────────────────────────────
+if [[ $DISK_FREE_GB -lt 5 ]]; then
+  warn "Свободного места меньше 5 GB (${DISK_FREE_GB} GB). Установка может завершиться ошибкой."
+fi
 
 # ── Auto-calculate optimal swap size ─────────────────────────────────────────
 if   [[ $TOTAL_RAM_MB -le 1024 ]]; then SWAP_GB=2
@@ -99,18 +174,6 @@ elif [[ $TOTAL_RAM_MB -le 2048 ]]; then SWAP_GB=2
 elif [[ $TOTAL_RAM_MB -le 4096 ]]; then SWAP_GB=4
 elif [[ $TOTAL_RAM_MB -le 8192 ]]; then SWAP_GB=4
 else                                     SWAP_GB=0; fi
-
-# ── Helper: safe interactive read ────────────────────────────────────────────
-# FIX: use printf for prompt (goes to /dev/tty directly) + plain read.
-# Avoids 'read -p' prompt disappearing when stdout is redirected to tee.
-ask() {
-  local var_name="$1"
-  local prompt="$2"
-  printf "%s" "$prompt" > /dev/tty
-  local val
-  read -r val < /dev/tty || err "Не удалось прочитать ввод с терминала"
-  printf -v "$var_name" '%s' "$val"
-}
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PHASE 1 — THREE QUESTIONS
@@ -124,7 +187,6 @@ echo -e "  ${C}2${NC}) Node.js (NVM) + PM2 + Nginx"
 echo -e "  ${C}3${NC}) Python 3 + pip + Nginx"
 echo -e "  ${C}4${NC}) Только базовый набор утилит"
 echo ""
-# FIX: explicit empty-string check + tty fallback error
 STACK_CHOICE=""
 while true; do
   ask STACK_CHOICE "  Выбор [1-4]: "
@@ -135,7 +197,7 @@ echo ""
 
 # ── Q2: Security ──────────────────────────────────────────────────────────────
 echo -e "${W}  Q2. Уровень безопасности?${NC}"
-echo -e "  ${C}1${NC}) Базовый  — UFW (80/443/22) + swap"
+echo -e "  ${C}1${NC}) Базовый  — UFW (80/443/SSH) + swap"
 echo -e "  ${C}2${NC}) Полный   — + fail2ban + SSH hardening + auto-updates"
 echo ""
 SEC_LEVEL=""
@@ -190,15 +252,15 @@ ask CONFIRM "  Всё верно? Продолжить? [y/N]: "
 step "Phase 1/4 — Обновление системы"
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get upgrade -y -qq \
+retry apt-get update -qq
+retry apt-get upgrade -y -qq \
   -o Dpkg::Options::="--force-confdef" \
   -o Dpkg::Options::="--force-confold"
 ok "Система обновлена"
 
 # ── Essential tools ───────────────────────────────────────────────────────────
 step "Установка базовых утилит"
-apt-get install -y -qq \
+retry apt-get install -y -qq \
   htop nano vim curl wget git unzip zip \
   net-tools dnsutils traceroute \
   ca-certificates gnupg lsb-release \
@@ -210,10 +272,19 @@ ok "Базовые утилиты установлены"
 
 # ── Swap configuration ────────────────────────────────────────────────────────
 step "Настройка Swap"
+SWAP_FILE="/swapfile"
 if [[ $SWAP_GB -gt 0 ]]; then
-  SWAP_FILE="/swapfile"
   if swapon --show | grep -q "$SWAP_FILE"; then
-    warn "Swap уже существует — пропускаем"
+    warn "Swap уже активен — пропускаем"
+  elif [[ -f "$SWAP_FILE" ]]; then
+    # File exists but not active — activate without recreating
+    warn "Файл $SWAP_FILE существует, но не активен — активируем"
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE" > /dev/null
+    swapon "$SWAP_FILE"
+    grep -q "$SWAP_FILE" /etc/fstab || \
+      echo "${SWAP_FILE} none swap sw 0 0" >> /etc/fstab
+    ok "Swap активирован (существующий файл)"
   else
     info "Создаём swap ${SWAP_GB}GB..."
     if ! fallocate -l "${SWAP_GB}G" "$SWAP_FILE" 2>/dev/null; then
@@ -245,7 +316,7 @@ vm.vfs_cache_pressure=50
 net.core.somaxconn=65535
 net.core.netdev_max_backlog=65535
 net.ipv4.tcp_max_syn_backlog=8192
-# tcp_tw_reuse: safe on kernel >= 4.19; ignored on older kernels
+# tcp_tw_reuse: safe on kernel >= 4.19; silently ignored on older kernels
 net.ipv4.tcp_tw_reuse=1
 net.ipv4.tcp_fin_timeout=15
 net.ipv4.ip_local_port_range=1024 65535
@@ -288,20 +359,20 @@ step "Phase 2/4 — Безопасность"
 
 # ── UFW Firewall ──────────────────────────────────────────────────────────────
 info "Настраиваем UFW..."
-apt-get install -y -qq ufw > /dev/null 2>&1
+retry apt-get install -y -qq ufw > /dev/null 2>&1
 
-ufw --force reset  > /dev/null 2>&1
+# Reset only if UFW is not yet active — preserve custom rules on existing setups
+if ufw status | grep -q "Status: active"; then
+  warn "UFW уже активен — добавляем правила поверх существующих (reset пропущен)"
+else
+  ufw --force reset > /dev/null 2>&1
+fi
+
 ufw default deny incoming  > /dev/null
 ufw default allow outgoing > /dev/null
 ufw allow "$SSH_PORT"/tcp  > /dev/null   # SSH
 ufw allow 80/tcp           > /dev/null   # HTTP
 ufw allow 443/tcp          > /dev/null   # HTTPS
-
-# FIX: UFW range syntax compatible with UFW >= 0.35
-if [[ $STACK_CHOICE -eq 1 ]]; then
-  ufw allow from 127.0.0.1 to any port 3000:9000 proto tcp \
-    > /dev/null 2>&1 && true  # non-fatal: older UFW may reject range syntax
-fi
 
 ufw --force enable > /dev/null
 ok "UFW активен. Открыты порты: $SSH_PORT (SSH), 80, 443"
@@ -311,7 +382,7 @@ if [[ $SEC_LEVEL -eq 2 ]]; then
 
   # Fail2ban
   info "Устанавливаем fail2ban..."
-  apt-get install -y -qq fail2ban > /dev/null 2>&1
+  retry apt-get install -y -qq fail2ban > /dev/null 2>&1
 
   # Detect correct auth log path (Ubuntu 22.04+ uses systemd journal)
   if [[ -f /var/log/auth.log ]]; then
@@ -342,11 +413,10 @@ EOF
   # SSH hardening
   info "Hardening SSH..."
   SSH_CFG="/etc/ssh/sshd_config"
-  # FIX: Save backup filename to variable so rollback uses SAME file
   SSH_BACKUP="${SSH_CFG}.bak.$(date +%s)"
   cp "$SSH_CFG" "$SSH_BACKUP"
 
-  sed -i "s/^#*Port .*/Port $SSH_PORT/"           "$SSH_CFG"
+  sed -i "s/^#*Port .*/Port $SSH_PORT/" "$SSH_CFG"
 
   # Anti-lockout: only disable root login if another sudo user exists
   SUDO_USERS_COUNT=$(getent group sudo 2>/dev/null | cut -d: -f4 \
@@ -355,14 +425,25 @@ EOF
     sed -i "s/^#*PermitRootLogin .*/PermitRootLogin no/" "$SSH_CFG"
     ok "Root login отключён (найден пользователь с sudo)"
   else
-    warn "Root login ОСТАВЛЕН включённым — нет других sudo-пользователей. Создай пользователя вручную!"
+    warn "Root login ОСТАВЛЕН — нет других sudo-пользователей. Создай пользователя вручную!"
   fi
 
-  # Keep PasswordAuthentication ON — user may not have keys set up yet
-  sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CFG"
-  sed -i "s/^#*MaxAuthTries .*/MaxAuthTries 3/"       "$SSH_CFG"
-  sed -i "s/^#*LoginGraceTime .*/LoginGraceTime 20/"  "$SSH_CFG"
-  sed -i "s/^#*X11Forwarding .*/X11Forwarding no/"    "$SSH_CFG"
+  # Smart PasswordAuthentication: disable only if authorized_keys already exist
+  HAS_KEYS=0
+  for key_file in /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys; do
+    [[ -s "$key_file" ]] && HAS_KEYS=1 && break
+  done
+  if [[ $HAS_KEYS -eq 1 ]]; then
+    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSH_CFG"
+    ok "SSH ключи найдены — парольная аутентификация отключена"
+  else
+    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CFG"
+    warn "SSH ключи не найдены — парольный вход оставлен. Задеплой ключи и отключи вручную!"
+  fi
+
+  sed -i "s/^#*MaxAuthTries .*/MaxAuthTries 3/"      "$SSH_CFG"
+  sed -i "s/^#*LoginGraceTime .*/LoginGraceTime 20/" "$SSH_CFG"
+  sed -i "s/^#*X11Forwarding .*/X11Forwarding no/"   "$SSH_CFG"
 
   grep -q "^ClientAliveInterval" "$SSH_CFG" || echo "ClientAliveInterval 300" >> "$SSH_CFG"
   grep -q "^ClientAliveCountMax" "$SSH_CFG" || echo "ClientAliveCountMax 2"   >> "$SSH_CFG"
@@ -370,14 +451,13 @@ EOF
 
   # Validate → apply or rollback
   if sshd -t 2>/dev/null; then
-    systemctl restart sshd
-    ok "SSH hardened: порт $SSH_PORT, root login ограничен"
+    restart_ssh
+    ok "SSH hardened: порт $SSH_PORT"
   else
-    # FIX: rollback to saved backup (same filename, not new timestamp)
     warn "sshd_config невалиден — откатываем конфиг"
     cp "$SSH_BACKUP" "$SSH_CFG"
     if sshd -t 2>/dev/null; then
-      systemctl restart sshd
+      restart_ssh
       warn "SSH восстановлен из бэкапа $SSH_BACKUP"
     else
       warn "SSH конфиг повреждён! Проверь вручную: sshd -t"
@@ -390,7 +470,7 @@ EOF
 
   # Unattended security upgrades
   info "Настраиваем автообновления безопасности..."
-  apt-get install -y -qq unattended-upgrades > /dev/null 2>&1
+  retry apt-get install -y -qq unattended-upgrades > /dev/null 2>&1
   cat > /etc/apt/apt.conf.d/50unattended-upgrades-serverinit << 'EOF'
 Unattended-Upgrade::Allowed-Origins {
   "${distro_id}:${distro_codename}-security";
@@ -403,7 +483,7 @@ EOF
 APT::Periodic::Unattended-Upgrade "1";' > /etc/apt/apt.conf.d/20auto-upgrades
   ok "Автообновления безопасности включены"
 
-  # FIX: check correct shm path (Ubuntu 22.04+: /dev/shm, legacy: /run/shm)
+  # Shared memory protection
   if [[ -d /dev/shm ]]; then
     SHM_MOUNT="/dev/shm"
   else
@@ -418,19 +498,6 @@ fi
 #  PHASE 3/4 — STACK INSTALLATION
 # ══════════════════════════════════════════════════════════════════════════════
 step "Phase 3/4 — Установка стека: $STACK_NAME"
-
-install_nginx() {
-  if ! command -v nginx &>/dev/null; then
-    info "Устанавливаем Nginx..."
-    apt-get install -y -qq nginx > /dev/null 2>&1
-    systemctl enable nginx > /dev/null 2>&1
-    systemctl start  nginx > /dev/null 2>&1
-    sed -i "s/^worker_processes .*/worker_processes auto;/" /etc/nginx/nginx.conf
-    ok "Nginx установлен и запущен"
-  else
-    ok "Nginx уже установлен"
-  fi
-}
 
 # ── Docker + Compose ──────────────────────────────────────────────────────────
 if [[ $STACK_CHOICE -eq 1 ]]; then
@@ -450,8 +517,8 @@ if [[ $STACK_CHOICE -eq 1 ]]; then
 https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
       > /etc/apt/sources.list.d/docker.list
 
-    apt-get update -qq
-    apt-get install -y -qq \
+    retry apt-get update -qq
+    retry apt-get install -y -qq \
       docker-ce docker-ce-cli containerd.io \
       docker-buildx-plugin docker-compose-plugin \
       > /dev/null 2>&1
@@ -465,7 +532,7 @@ https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
     ok "Docker $(docker --version | cut -d' ' -f3 | tr -d ',') установлен"
   fi
 
-  # FIX: Don't overwrite existing daemon.json — merge instead
+  # Merge daemon.json — don't overwrite existing config
   DOCKER_DAEMON="/etc/docker/daemon.json"
   mkdir -p /etc/docker
   if [[ ! -f "$DOCKER_DAEMON" ]]; then
@@ -487,37 +554,78 @@ EOF
   fi
 
   systemctl reload-or-restart docker > /dev/null 2>&1 || true
+
+  # Docker + UFW: Docker bypasses UFW via direct iptables manipulation.
+  # Insert a DROP rule into DOCKER-USER chain so only explicitly allowed
+  # connections reach containers. Loopback and established connections pass.
+  if iptables -L DOCKER-USER > /dev/null 2>&1; then
+    iptables -I DOCKER-USER -j DROP 2>/dev/null || true
+    iptables -I DOCKER-USER -i lo -j ACCEPT 2>/dev/null || true
+    iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || true
+
+    # Open only what UFW already knows about (SSH, 80, 443)
+    iptables -I DOCKER-USER -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || true
+    iptables -I DOCKER-USER -p tcp --dport 80  -j ACCEPT 2>/dev/null || true
+    iptables -I DOCKER-USER -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+
+    # Persist rules across reboots
+    if apt-get install -y -qq iptables-persistent > /dev/null 2>&1; then
+      netfilter-persistent save > /dev/null 2>&1 || true
+      ok "iptables DOCKER-USER правила сохранены (iptables-persistent)"
+    else
+      warn "iptables-persistent не установлен — правила DOCKER-USER сбросятся после перезагрузки"
+    fi
+    ok "Docker + UFW: DOCKER-USER цепочка защищена"
+  else
+    warn "DOCKER-USER цепочка не найдена — запусти Docker и повтори вручную:
+  iptables -I DOCKER-USER -j DROP
+  iptables -I DOCKER-USER -i lo -j ACCEPT
+  iptables -I DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  fi
+
   install_nginx
 fi
 
 # ── Node.js via NVM ───────────────────────────────────────────────────────────
 if [[ $STACK_CHOICE -eq 2 ]]; then
-  info "Устанавливаем NVM v${NVM_VERSION} + Node.js LTS ${NODE_LTS}..."
+  # Install under the invoking user, not root.
+  # If run via sudo, SUDO_USER contains the real username.
+  TARGET_USER="${SUDO_USER:-root}"
+  USER_HOME=$(eval echo "~$TARGET_USER")
+  NVM_DIR_PATH="$USER_HOME/.nvm"
 
-  export NVM_DIR="/root/.nvm"
-  curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh" \
-    | bash > /dev/null 2>&1
-  # shellcheck source=/dev/null
-  [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+  info "Устанавливаем NVM v${NVM_VERSION} + Node.js LTS ${NODE_LTS} для пользователя '$TARGET_USER'..."
 
-  nvm install "$NODE_LTS"       > /dev/null 2>&1
-  nvm use     "$NODE_LTS"       > /dev/null 2>&1
-  nvm alias   default "$NODE_LTS" > /dev/null 2>&1
+  # Run everything as the target user to avoid root-owned NVM
+  su - "$TARGET_USER" -c "
+    export NVM_DIR='$NVM_DIR_PATH'
+    curl -fsSL 'https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh' \
+      | bash > /dev/null 2>&1
+    [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
+    nvm install $NODE_LTS        > /dev/null 2>&1
+    nvm use     $NODE_LTS        > /dev/null 2>&1
+    nvm alias   default $NODE_LTS > /dev/null 2>&1
+  "
 
-  # NVM available system-wide (profile.d)
-  cat > /etc/profile.d/nvm.sh << 'EOF'
-export NVM_DIR="/root/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ]             && \. "$NVM_DIR/nvm.sh"
-[ -s "$NVM_DIR/bash_completion" ]    && \. "$NVM_DIR/bash_completion"
+  ok "Node.js $(su - "$TARGET_USER" -c "export NVM_DIR='$NVM_DIR_PATH'; [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; node --version 2>/dev/null" 2>/dev/null || echo "LTS") установлен для '$TARGET_USER'"
+
+  # system-wide profile.d — points to the correct user's NVM dir
+  cat > /etc/profile.d/nvm.sh << EOF
+export NVM_DIR="$NVM_DIR_PATH"
+[ -s "\$NVM_DIR/nvm.sh" ]          && \\. "\$NVM_DIR/nvm.sh"
+[ -s "\$NVM_DIR/bash_completion" ] && \\. "\$NVM_DIR/bash_completion"
 EOF
   chmod 644 /etc/profile.d/nvm.sh
 
-  ok "Node.js $(node --version 2>/dev/null) установлен"
-
+  # Install PM2 as target user
   info "Устанавливаем PM2..."
-  npm install -g pm2 > /dev/null 2>&1
-  pm2 startup systemd -u root --hp /root > /dev/null 2>&1 || true
-  ok "PM2 $(pm2 --version 2>/dev/null) установлен"
+  su - "$TARGET_USER" -c "
+    export NVM_DIR='$NVM_DIR_PATH'
+    [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
+    npm install -g pm2 > /dev/null 2>&1
+    pm2 startup systemd -u $TARGET_USER --hp $USER_HOME > /dev/null 2>&1 || true
+  "
+  ok "PM2 установлен для '$TARGET_USER'"
 
   install_nginx
 fi
@@ -525,15 +633,13 @@ fi
 # ── Python 3 ─────────────────────────────────────────────────────────────────
 if [[ $STACK_CHOICE -eq 3 ]]; then
   info "Настраиваем Python 3..."
-  apt-get install -y -qq \
+  retry apt-get install -y -qq \
     python3 python3-pip python3-venv python3-dev \
     python3-setuptools python3-wheel \
     > /dev/null 2>&1
 
-  # python → python3 alias
   update-alternatives --install /usr/bin/python python /usr/bin/python3 1 > /dev/null 2>&1
 
-  # pipx (use --break-system-packages for Ubuntu 23.04+, fallback for older)
   pip3 install --quiet --break-system-packages pipx 2>/dev/null || \
     pip3 install --quiet pipx
 
@@ -590,8 +696,9 @@ $([ "$SEC_LEVEL" = "2" ] && echo "  ✔ fail2ban (SSH: 3 попытки, бан 
   ✔ SSH hardened (порт $SSH_PORT)
   ✔ unattended-upgrades (security only)" || echo "  — fail2ban (только в полном режиме)")
 $([ "$STACK_CHOICE" = "1" ] && echo "  ✔ Docker + Docker Compose Plugin
-  ✔ Nginx (worker_processes auto)")
-$([ "$STACK_CHOICE" = "2" ] && echo "  ✔ Node.js LTS ${NODE_LTS} via NVM ${NVM_VERSION}
+  ✔ Nginx (worker_processes auto)
+  ✔ iptables DOCKER-USER защита")
+$([ "$STACK_CHOICE" = "2" ] && echo "  ✔ Node.js LTS ${NODE_LTS} via NVM ${NVM_VERSION} (пользователь: ${SUDO_USER:-root})
   ✔ PM2 + systemd startup
   ✔ Nginx (worker_processes auto)")
 $([ "$STACK_CHOICE" = "3" ] && echo "  ✔ Python 3 + pip + venv + pipx
@@ -601,7 +708,8 @@ $([ "$STACK_CHOICE" = "3" ] && echo "  ✔ Python 3 + pip + venv + pipx
 
 ══ Следующие шаги ═══════════════════════════════════════
 $([ "$STACK_CHOICE" = "1" ] && echo "  cd /your/project && docker compose up -d
-  ufw allow PORT/tcp          # expose app ports")
+  ufw allow PORT/tcp && iptables -I DOCKER-USER -p tcp --dport PORT -j ACCEPT
+  netfilter-persistent save       # сохранить iptables правило")
 $([ "$STACK_CHOICE" = "2" ] && echo "  source /etc/profile.d/nvm.sh
   pm2 start app.js --name myapp && pm2 save")
 $([ "$STACK_CHOICE" = "3" ] && echo "  python3 -m venv .venv && source .venv/bin/activate
@@ -609,11 +717,13 @@ $([ "$STACK_CHOICE" = "3" ] && echo "  python3 -m venv .venv && source .venv/bin
   certbot --nginx -d yourdomain.com   # SSL/TLS
 $([ "$SSH_PORT" != "22" ] && echo "
   ⚠  ВАЖНО: SSH теперь на порту $SSH_PORT
-  Проверь: ssh -p $SSH_PORT user@$(hostname -I | awk '{print $1}')")
-$([ "$SEC_LEVEL" = "2" ] && echo "
-  Отключить пароль SSH (после настройки ключей):
+  Проверь доступ: ssh -p $SSH_PORT user@$IP_ADDR")
+$([ "$HAS_KEYS" = "0" ] && [ "$SEC_LEVEL" = "2" ] && echo "
+  ⚠  Задеплой SSH ключи и отключи пароль:
+  ssh-copy-id -p $SSH_PORT user@$IP_ADDR
   sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-  systemctl restart sshd")
+  # затем перезапусти SSH:
+  systemctl restart ssh || systemctl restart sshd")
 ══════════════════════════════════════════════════════════
 REPORT
 
@@ -636,6 +746,10 @@ echo ""
   echo -e "  ${Y}${BOLD}⚠  SSH перенесён на порт $SSH_PORT — не потеряй доступ!${NC}"
 [[ $STACK_CHOICE -eq 1 ]] && \
   echo -e "  ${C}→  Перелогинься чтобы использовать docker без sudo${NC}"
+[[ $STACK_CHOICE -eq 1 ]] && \
+  echo -e "  ${Y}→  При expose контейнерных портов добавляй правило и в UFW, и в iptables DOCKER-USER${NC}"
+[[ $STACK_CHOICE -eq 2 ]] && \
+  echo -e "  ${C}→  NVM установлен для пользователя '${SUDO_USER:-root}' — используй: source /etc/profile.d/nvm.sh${NC}"
 
 echo ""
 sep

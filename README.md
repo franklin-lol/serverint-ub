@@ -21,7 +21,7 @@ Universal server initialization script for Ubuntu & Debian. One command to get a
 ### Запуск
 ```bash
 # Рекомендуемый способ (через curl)
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/serverinit.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh | sudo bash
 
 # Локально
 sudo bash serverinit.sh
@@ -49,7 +49,7 @@ A comprehensive script for rapid server initialization. Replaces hours of manual
 ### Usage
 ```bash
 # Recommended (via curl)
-curl -fsSL https://raw.githubusercontent.com/YOUR_USER/YOUR_REPO/main/serverinit.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh | sudo bash
 
 # Locally
 sudo bash serverinit.sh

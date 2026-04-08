@@ -180,6 +180,20 @@ elif [[ $TOTAL_RAM_MB -le 4096 ]]; then SWAP_GB=4
 elif [[ $TOTAL_RAM_MB -le 8192 ]]; then SWAP_GB=4
 else                                     SWAP_GB=0; fi
 
+# ── Smart disk limiter ────────────────────────────────────────────────────────
+# Ensure at least 5 GB of free disk space remains after creating swap.
+# Example: 7 GB free, SWAP_GB=4 → only 3 GB left — too tight for Docker/Node.
+# Fix: SWAP_GB = min(SWAP_GB, DISK_FREE_GB - 5), floor to 0 if negative.
+MIN_FREE_AFTER_SWAP=5
+if [[ $SWAP_GB -gt 0 ]]; then
+  DISK_AFTER_SWAP=$(( DISK_FREE_GB - SWAP_GB ))
+  if [[ $DISK_AFTER_SWAP -lt $MIN_FREE_AFTER_SWAP ]]; then
+    SWAP_GB=$(( DISK_FREE_GB - MIN_FREE_AFTER_SWAP ))
+    [[ $SWAP_GB -lt 0 ]] && SWAP_GB=0
+    warn "Мало места на диске — Swap уменьшен до ${SWAP_GB} ГБ (оставляем ≥ ${MIN_FREE_AFTER_SWAP} ГБ свободных)"
+  fi
+fi
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  PHASE 1 — THREE QUESTIONS
 # ══════════════════════════════════════════════════════════════════════════════

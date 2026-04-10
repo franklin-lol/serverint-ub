@@ -409,6 +409,9 @@ ok "Лимиты файловых дескрипторов настроены (1
 # ══════════════════════════════════════════════════════════════════════════════
 #  PHASE 2/4 — SECURITY
 # ══════════════════════════════════════════════════════════════════════════════
+# HAS_KEYS initialized here — prevents unbound variable error (set -u)
+# when SEC_LEVEL=1 and the REPORT heredoc references it at the bottom.
+HAS_KEYS=0
 step "Phase 2/4 — Безопасность"
 
 # ── UFW Firewall ──────────────────────────────────────────────────────────────
@@ -486,19 +489,21 @@ EOF
       warn "Root login ОСТАВЛЕН — нет других sudo-пользователей. Создай пользователя вручную!"
     fi
 
-    # Smart PasswordAuthentication: disable only if authorized_keys already exist
-    HAS_KEYS=0
+    # Smart PasswordAuthentication: disable only if user authorized_keys exist.
+    # HAS_KEYS was initialized to 0 before Phase 2 block (set -u compliance).
     for key_file in /home/*/.ssh/authorized_keys /root/.ssh/authorized_keys; do
       [[ -s "$key_file" ]] && HAS_KEYS=1 && break
     done
     if [[ $HAS_KEYS -eq 1 ]]; then
-      sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication no/" "$SSH_CFG"
-      ok "SSH ключи найдены — парольная аутентификация отключена"
+      PASSWD_AUTH_VAL="no"
+      ok "SSH ключи найдены — парольная аутентификация будет отключена"
     else
-      sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication yes/" "$SSH_CFG"
+      PASSWD_AUTH_VAL="yes"
       warn "SSH ключи не найдены — парольный вход оставлен. Задеплой ключи и отключи вручную!"
     fi
 
+    # Apply to main sshd_config
+    sed -i "s/^#*PasswordAuthentication .*/PasswordAuthentication $PASSWD_AUTH_VAL/" "$SSH_CFG"
     sed -i "s/^#*MaxAuthTries .*/MaxAuthTries 3/"      "$SSH_CFG"
     sed -i "s/^#*LoginGraceTime .*/LoginGraceTime 20/" "$SSH_CFG"
     sed -i "s/^#*X11Forwarding .*/X11Forwarding no/"   "$SSH_CFG"
@@ -506,6 +511,45 @@ EOF
     grep -q "^ClientAliveInterval" "$SSH_CFG" || echo "ClientAliveInterval 300" >> "$SSH_CFG"
     grep -q "^ClientAliveCountMax" "$SSH_CFG" || echo "ClientAliveCountMax 2"   >> "$SSH_CFG"
     grep -q "^MaxStartups"         "$SSH_CFG" || echo "MaxStartups 10:30:60"    >> "$SSH_CFG"
+
+    # ── CRITICAL FIX: sshd_config.d drop-in override ─────────────────────────
+    # Ubuntu 22.04+ cloud images ship /etc/ssh/sshd_config.d/50-cloud-init.conf
+    # with "PasswordAuthentication no". The Include directive in sshd_config
+    # processes drop-ins AFTER the main file — last value wins in OpenSSH.
+    # Editing only /etc/ssh/sshd_config is therefore USELESS on such systems.
+    #
+    # Strategy:
+    #   1. Patch any existing drop-in that conflicts with our desired value.
+    #   2. Create /etc/ssh/sshd_config.d/99-serverinit.conf — "99" prefix
+    #      ensures it is processed last, overriding everything (50-cloud-init etc).
+    SSHD_DROPIN_DIR="/etc/ssh/sshd_config.d"
+    if [[ -d "$SSHD_DROPIN_DIR" ]]; then
+      while IFS= read -r -d "" dropin_file; do
+        if grep -qiE "^[[:space:]]*#*PasswordAuthentication" "$dropin_file"; then
+          sed -i -E "s/^[[:space:]]*#*(PasswordAuthentication).*/\1 $PASSWD_AUTH_VAL/Ig" "$dropin_file"
+          info "Исправлен конфликтующий drop-in: $dropin_file"
+        fi
+      done < <(find "$SSHD_DROPIN_DIR" -maxdepth 1 -name "*.conf"                  ! -name "99-serverinit.conf" -type f -print0)
+
+      # Write authoritative drop-in — processed after all others, always wins
+      cat > "$SSHD_DROPIN_DIR/99-serverinit.conf" << DROPIN
+# ServerInit — authoritative SSH hardening drop-in (priority 99)
+# This file is processed AFTER all other drop-ins (50-cloud-init etc.)
+# and overrides them. Edit here, not in cloud-init or main sshd_config.
+Port $SSH_PORT
+PasswordAuthentication $PASSWD_AUTH_VAL
+MaxAuthTries 3
+LoginGraceTime 20
+X11Forwarding no
+ClientAliveInterval 300
+ClientAliveCountMax 2
+MaxStartups 10:30:60
+DROPIN
+      ok "Авторитетный drop-in создан: $SSHD_DROPIN_DIR/99-serverinit.conf"
+      ok "PasswordAuthentication=$PASSWD_AUTH_VAL перекроет cloud-init и всё прочее"
+    else
+      warn "Директория $SSHD_DROPIN_DIR не найдена — применено только в sshd_config"
+    fi
 
     # Validate → apply or rollback
     if /usr/sbin/sshd -t 2>/dev/null; then
@@ -598,6 +642,49 @@ https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
     [[ -n "$SUDO_USER_NAME" ]] && usermod -aG docker "$SUDO_USER_NAME" 2>/dev/null || true
 
     ok "Docker $(docker --version | cut -d' ' -f3 | tr -d ',') установлен"
+  fi
+
+  # ── Remove legacy docker-compose v1 ──────────────────────────────────────────
+  # Ubuntu repos ship a standalone python3-based docker-compose (v1) that:
+  #   a) gets called instead of the plugin when typed as "docker-compose"
+  #   b) uses old API and fails on modern compose files (version: "3.x" etc.)
+  # Remove it unconditionally — the plugin supersedes it entirely.
+  _removed_legacy=0
+  for _legacy_pkg in docker-compose python3-docker-compose; do
+    if dpkg -l "$_legacy_pkg" 2>/dev/null | grep -q "^ii"; then
+      info "Удаляем устаревший пакет: $_legacy_pkg"
+      apt-get remove -y -qq "$_legacy_pkg" > /dev/null 2>&1
+      _removed_legacy=1
+    fi
+  done
+  # Also remove pip-installed version if present
+  if pip3 show docker-compose &>/dev/null 2>&1; then
+    pip3 uninstall -y docker-compose > /dev/null 2>&1 || true
+    _removed_legacy=1
+  fi
+  [[ $_removed_legacy -eq 1 ]] && ok "Устаревший docker-compose v1 удалён"
+
+  # Verify compose plugin
+  if ! docker compose version &>/dev/null 2>&1; then
+    warn "docker compose plugin не отвечает — переустанавливаем..."
+    retry apt-get install -y -qq docker-compose-plugin > /dev/null 2>&1
+  fi
+  ok "Docker Compose Plugin: $(docker compose version --short 2>/dev/null || echo 'installed')"
+
+  # Backward-compat shim: docker-compose → docker compose
+  # Some legacy Makefiles, CI scripts, and tools still call the old binary name.
+  # The shim is safe: it transparently passes all args to the plugin.
+  if [[ ! -f /usr/local/bin/docker-compose ]]; then
+    cat > /usr/local/bin/docker-compose << 'SHIM'
+#!/bin/sh
+# ServerInit compatibility shim — redirects legacy docker-compose calls
+# to the official Docker Compose plugin. All arguments are forwarded as-is.
+exec docker compose "$@"
+SHIM
+    chmod +x /usr/local/bin/docker-compose
+    ok "Создан shim /usr/local/bin/docker-compose → docker compose (legacy совместимость)"
+  else
+    ok "Shim /usr/local/bin/docker-compose уже существует"
   fi
 
   # Merge daemon.json — don't overwrite existing config

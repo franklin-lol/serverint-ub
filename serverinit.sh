@@ -613,34 +613,44 @@ step "Phase 3/4 — Установка стека: $STACK_NAME"
 
 # ── Docker + Compose ──────────────────────────────────────────────────────────
 if [[ $STACK_CHOICE -eq 1 ]]; then
+
+  # Register Docker's official APT repo unconditionally.
+  # Root cause of silent failure: when Docker is pre-installed from Ubuntu's
+  # repo (suffix *0ubuntu*), the script skipped GPG/sources.list setup and
+  # jumped to "already installed". Subsequent `apt-get install docker-compose-plugin`
+  # then failed silently — the package only exists in download.docker.com, not Ubuntu's repo.
+  _ensure_docker_repo() {
+    if [[ ! -f /etc/apt/sources.list.d/docker.list ]]; then
+      info "Регистрируем официальный репозиторий Docker..."
+      local _OS_ID _OS_CODENAME
+      _OS_ID=$(. /etc/os-release && echo "$ID")
+      _OS_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+      install -m 0755 -d /etc/apt/keyrings
+      curl -fsSL "https://download.docker.com/linux/$_OS_ID/gpg" \
+        | gpg --dearmor --batch --yes -o /etc/apt/keyrings/docker.gpg
+      chmod a+r /etc/apt/keyrings/docker.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/$_OS_ID $_OS_CODENAME stable" \
+        > /etc/apt/sources.list.d/docker.list
+      retry apt-get update -qq
+      ok "Репозиторий Docker (download.docker.com) зарегистрирован"
+    fi
+  }
+
   if command -v docker &>/dev/null; then
     ok "Docker уже установлен ($(docker --version | cut -d' ' -f3 | tr -d ','))"
+    _ensure_docker_repo   # always needed — plugin lives only in Docker's repo
   else
     info "Устанавливаем Docker (официальный репозиторий)..."
-    OS_ID=$(. /etc/os-release && echo "$ID")
-    OS_CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
-
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL "https://download.docker.com/linux/$OS_ID/gpg" \
-      | gpg --dearmor --batch --yes -o /etc/apt/keyrings/docker.gpg 2>/dev/null
-    chmod a+r /etc/apt/keyrings/docker.gpg
-
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/$OS_ID $OS_CODENAME stable" \
-      > /etc/apt/sources.list.d/docker.list
-
-    retry apt-get update -qq
+    _ensure_docker_repo
     retry apt-get install -y -qq \
       docker-ce docker-ce-cli containerd.io \
       docker-buildx-plugin docker-compose-plugin \
       > /dev/null 2>&1
-
     systemctl enable docker > /dev/null 2>&1
     systemctl start  docker > /dev/null 2>&1
-
     SUDO_USER_NAME="${SUDO_USER:-}"
     [[ -n "$SUDO_USER_NAME" ]] && usermod -aG docker "$SUDO_USER_NAME" 2>/dev/null || true
-
     ok "Docker $(docker --version | cut -d' ' -f3 | tr -d ',') установлен"
   fi
 

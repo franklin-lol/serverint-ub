@@ -23,8 +23,10 @@ CI_MODE=0
 for _arg in "$@"; do [[ "$_arg" == "--ci" ]] && CI_MODE=1; done
 
 # ── Versions (update here only) ───────────────────────────────────────────────
-NVM_VERSION="0.40.1"
+NVM_VERSION="0.40.1"      # fallback, если GitHub API недоступен — см. resolve ниже
+# shellcheck disable=SC2034  # справочная константа; фактически ставится --lts (см. Node-стек)
 NODE_LTS="22"
+NODE_INSTALLED_VERSION="" # заполняется в Node-стеке; инициализирован из-за set -u
 
 # ── ANSI palette ─────────────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[0;33m' B='\033[0;34m'
@@ -110,6 +112,114 @@ install_nginx() {
   else
     ok "Nginx уже установлен"
   fi
+
+  # ── Baseline hardening: новый conf.d файл, nginx.conf не трогаем ───────────
+  # Дубли с nginx.conf безвредны — в рамках одного context'а побеждает
+  # директива, обработанная последней; синтаксической ошибки не возникает.
+  NGINX_HARDENING="/etc/nginx/conf.d/00-serverinit-hardening.conf"
+  if [[ ! -f "$NGINX_HARDENING" ]]; then
+    cat > "$NGINX_HARDENING" << 'EOF'
+# ServerInit — базовый хардненинг (аддитивно, безопасные дефолты)
+
+server_tokens off;
+
+client_max_body_size   20m;
+client_body_timeout    12s;
+client_header_timeout  12s;
+keepalive_timeout      15s;
+send_timeout            10s;
+
+# Зона rate-limit объявлена, но нигде не применена — сама по себе ничего
+# не ограничивает. Чтобы включить на своём сайте, добавь в server{}/location{}:
+#   limit_req zone=general burst=20 nodelay;
+limit_req_zone $binary_remote_addr zone=general:10m rate=10r/s;
+
+gzip on;
+gzip_vary on;
+gzip_comp_level 5;
+gzip_min_length 256;
+gzip_types text/plain text/css application/json application/javascript
+           text/xml application/xml text/javascript image/svg+xml;
+EOF
+    if nginx -t &>/dev/null; then
+      systemctl reload nginx > /dev/null 2>&1
+      ok "Nginx hardening применён ($NGINX_HARDENING)"
+    else
+      warn "Конфиг невалиден после hardening — откатываем правку"
+      rm -f "$NGINX_HARDENING"
+      nginx -t &>/dev/null && systemctl reload nginx > /dev/null 2>&1
+    fi
+  else
+    ok "Nginx hardening уже применён — пропущено"
+  fi
+
+  # ── Security headers — опциональный сниппет, автоматически НЕ подключается ─
+  mkdir -p /etc/nginx/snippets
+  SNIPPET="/etc/nginx/snippets/security-headers.conf"
+  if [[ ! -f "$SNIPPET" ]]; then
+    cat > "$SNIPPET" << 'EOF'
+# ServerInit — опциональные security-заголовки.
+# Не подключается автоматически. Добавь в свой server{} блок вручную:
+#   include snippets/security-headers.conf;
+add_header X-Frame-Options "DENY" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+# Раскомментируй только на server{}, который уже терминирует HTTPS:
+# add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+EOF
+    ok "Сниппет security-заголовков создан: $SNIPPET (подключи include вручную)"
+  fi
+
+  # ── Справочный шаблон catch-all default_server — НЕ загружается nginx'ом ───
+  # (лежит вне conf.d и с расширением .example — нулевой риск конфликта
+  # с будущим default_server твоего собственного сайта).
+  mkdir -p /etc/nginx/templates
+  CATCHALL_TPL="/etc/nginx/templates/catchall-default-server.conf.example"
+  if [[ ! -f "$CATCHALL_TPL" ]]; then
+    cat > "$CATCHALL_TPL" << 'EOF'
+# ServerInit — справочный шаблон, nginx его НЕ подключает (не conf.d/*.conf).
+# Режет сканеры, бьющие по голому IP или чужому Host-заголовку.
+# Активировать: скопировать в /etc/nginx/conf.d/00-catchall.conf —
+# НО только если у тебя ещё нет своего default_server на 80/443
+# (nginx не даст запустить два default_server на одном порту).
+#
+# server {
+#     listen 80 default_server;
+#     listen [::]:80 default_server;
+#     server_name _;
+#     return 444;
+# }
+EOF
+    ok "Справочный шаблон catch-all создан: $CATCHALL_TPL"
+  fi
+}
+
+# Fail2ban jail против типовых сканеров уязвимостей (.env, .git, wp-admin,
+# terraform.tfstate и т.д.) — вызывается после install_nginx только когда
+# SEC_LEVEL=2 (fail2ban реально установлен). Идемпотентна.
+setup_scanbait_jail() {
+  command -v fail2ban-client &>/dev/null || return 0
+  [[ -f /etc/fail2ban/jail.d/nginx-scanbait.local ]] && { ok "fail2ban scanbait-jail уже настроен"; return 0; }
+
+  cat > /etc/fail2ban/filter.d/nginx-scanbait.conf << 'EOF'
+[Definition]
+failregex = ^<HOST> -.*"(GET|POST) /(\.env|\.aws|\.azure|\.git|wp-admin|wp-content|wp-json|wp-config|phpmyadmin|admingui|actuator|_ignition|\.streamlit|terraform\.tfstate|sftp-config|secrets\.yml|docker-compose\.yml|serverless\.yml|application\.yml|appsettings|gradle\.properties|ecosystem\.config|\.sentryclirc|server-status|server-info|jkstatus|jkmanager|cgi-bin)[^"]*" \d+
+ignoreregex =
+EOF
+
+  cat > /etc/fail2ban/jail.d/nginx-scanbait.local << 'EOF'
+[nginx-scanbait]
+enabled  = true
+port     = http,https
+filter   = nginx-scanbait
+logpath  = /var/log/nginx/access.log
+maxretry = 3
+findtime = 120
+bantime  = 86400
+EOF
+
+  systemctl reload fail2ban > /dev/null 2>&1 || systemctl restart fail2ban > /dev/null 2>&1
+  ok "fail2ban: jail nginx-scanbait добавлен (сканеры .env/.git/wp-admin/terraform.tfstate и т.п. banятся)"
 }
 
 # Trap: show where the script died and point to the log.
@@ -391,6 +501,13 @@ net.ipv4.tcp_synack_retries=2
 # Disable ICMP redirects
 net.ipv4.conf.all.accept_redirects=0
 net.ipv6.conf.all.accept_redirects=0
+
+# Anti-spoofing (reverse path filter, strict) + логирование martian-пакетов
+net.ipv4.conf.default.rp_filter=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.all.accept_source_route=0
+net.ipv6.conf.all.accept_source_route=0
 EOF
 
 sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1
@@ -592,6 +709,15 @@ APT::Periodic::Unattended-Upgrade "1";' > /etc/apt/apt.conf.d/20auto-upgrades
     warn "Конфиг автообновлений $U_CFG уже существует — пропущено"
   fi
 
+  # Docker-стек: репозиторий download.docker.com не помечен как "-security",
+  # поэтому unattended-upgrades его по умолчанию игнорирует — docker-ce не
+  # обновлялся бы автоматически. Дописываем origin отдельно (аддитивно,
+  # существующую "-security" строку не трогаем).
+  if [[ "$STACK_CHOICE" -eq 1 ]] && ! grep -q '"Docker:' "$U_CFG" 2>/dev/null; then
+    sed -i '/-security";/a\  "Docker:${distro_codename}";' "$U_CFG"
+    ok "Docker repo добавлен в unattended-upgrades (docker-ce будет обновляться автоматически)"
+  fi
+
   # Shared memory protection
   if [[ -d /dev/shm ]]; then
     SHM_MOUNT="/dev/shm"
@@ -700,23 +826,40 @@ SHIM
   # Merge daemon.json — don't overwrite existing config
   DOCKER_DAEMON="/etc/docker/daemon.json"
   mkdir -p /etc/docker
-  if [[ ! -f "$DOCKER_DAEMON" ]]; then
-    cat > "$DOCKER_DAEMON" << 'EOF'
-{
+  # live-restore: контейнеры переживают рестарт/апдейт dockerd без даунтайма.
+  # no-new-privileges: безопасный default для всех контейнеров без exec-флагов.
+  DOCKER_DEFAULTS='{
   "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "10m",
-    "max-file": "3"
-  },
+  "log-opts": { "max-size": "10m", "max-file": "3" },
   "default-ulimits": {
     "nofile": { "name": "nofile", "hard": 1048576, "soft": 1048576 }
-  }
-}
-EOF
-    ok "Docker daemon оптимизирован (логи: 10MB × 3)"
+  },
+  "live-restore": true,
+  "no-new-privileges": true
+}'
+  if [[ ! -f "$DOCKER_DAEMON" ]]; then
+    echo "$DOCKER_DEFAULTS" > "$DOCKER_DAEMON"
+    ok "Docker daemon оптимизирован (логи: 10MB × 3, live-restore, no-new-privileges)"
     systemctl reload-or-restart docker > /dev/null 2>&1 || true
   else
-    warn "daemon.json уже существует — конфиг не перезаписан. Проверь: $DOCKER_DAEMON"
+    # Не перезаписываем существующий конфиг целиком — добавляем ТОЛЬКО
+    # недостающие ключи через jq (уже установлен в Phase 1). Любое значение,
+    # которое администратор уже задал сам, побеждает и не трогается.
+    DOCKER_DAEMON_TMP="$(mktemp)"
+    if jq -s '.[0] * .[1]' <(echo "$DOCKER_DEFAULTS") "$DOCKER_DAEMON" > "$DOCKER_DAEMON_TMP" 2>/dev/null \
+       && jq empty "$DOCKER_DAEMON_TMP" 2>/dev/null; then
+      if diff -q "$DOCKER_DAEMON" "$DOCKER_DAEMON_TMP" > /dev/null 2>&1; then
+        ok "daemon.json уже содержит все нужные ключи — без изменений"
+      else
+        cp "$DOCKER_DAEMON" "${DOCKER_DAEMON}.bak.$(date +%s)"
+        mv "$DOCKER_DAEMON_TMP" "$DOCKER_DAEMON"
+        ok "daemon.json дополнен недостающими ключами (бэкап рядом, *.bak.*)"
+        systemctl reload-or-restart docker > /dev/null 2>&1 || true
+      fi
+    else
+      rm -f "$DOCKER_DAEMON_TMP"
+      warn "daemon.json существует, но jq не смог его безопасно смёрджить (невалидный JSON?) — не трогаем. Проверь вручную: $DOCKER_DAEMON"
+    fi
   fi
 
   # Docker + UFW: Idempotent rules with correct order using -C check
@@ -758,17 +901,28 @@ EOF
   fi
 
   install_nginx
+  setup_scanbait_jail
 fi
 
 # ── Node.js via NVM ───────────────────────────────────────────────────────────
 if [[ $STACK_CHOICE -eq 2 ]]; then
+  # Резолвим последний релиз NVM динамически (GitHub API). При недоступности
+  # API/rate-limit — тихий фолбэк на пин из шапки скрипта, ничего не ломаем.
+  _LATEST_NVM=$(curl -fsSL --max-time 5 https://api.github.com/repos/nvm-sh/nvm/releases/latest 2>/dev/null \
+    | grep -m1 '"tag_name"' | sed -E 's/.*"v?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')
+  if [[ "$_LATEST_NVM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    NVM_VERSION="$_LATEST_NVM"
+  else
+    warn "Не удалось получить последнюю версию NVM (GitHub API недоступен/rate-limit) — используем пин: $NVM_VERSION"
+  fi
+
   # Install under the invoking user, not root.
   # If run via sudo, SUDO_USER contains the real username.
   TARGET_USER="${SUDO_USER:-root}"
   USER_HOME=$(eval echo "~$TARGET_USER")
   NVM_DIR_PATH="$USER_HOME/.nvm"
 
-  info "Устанавливаем NVM v${NVM_VERSION} + Node.js LTS ${NODE_LTS} для пользователя '$TARGET_USER'..."
+  info "Устанавливаем NVM v${NVM_VERSION} + Node.js (последний LTS, --lts) для пользователя '$TARGET_USER'..."
 
   # Run everything as the target user to avoid root-owned NVM
   su - "$TARGET_USER" -c "
@@ -777,12 +931,13 @@ if [[ $STACK_CHOICE -eq 2 ]]; then
     bash /tmp/nvm_install.sh > /dev/null 2>&1
     rm -f /tmp/nvm_install.sh
     [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
-    nvm install $NODE_LTS        > /dev/null 2>&1
-    nvm use     $NODE_LTS        > /dev/null 2>&1
-    nvm alias   default $NODE_LTS > /dev/null 2>&1
+    nvm install --lts > /dev/null 2>&1
+    nvm use     --lts > /dev/null 2>&1
+    nvm alias   default \"\$(nvm current)\" > /dev/null 2>&1
   "
 
-  ok "Node.js $(su - "$TARGET_USER" -c "export NVM_DIR='$NVM_DIR_PATH'; [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; node --version 2>/dev/null" 2>/dev/null || echo "LTS") установлен для '$TARGET_USER'"
+  NODE_INSTALLED_VERSION=$(su - "$TARGET_USER" -c "export NVM_DIR='$NVM_DIR_PATH'; [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; node --version 2>/dev/null" 2>/dev/null || echo "LTS")
+  ok "Node.js $NODE_INSTALLED_VERSION (последний LTS) установлен для '$TARGET_USER'"
 
   # system-wide profile.d — points to the correct user's NVM dir
   cat > /etc/profile.d/nvm.sh << EOF
@@ -803,6 +958,7 @@ EOF
   ok "PM2 установлен для '$TARGET_USER'"
 
   install_nginx
+  setup_scanbait_jail
 fi
 
 # ── Python 3 ─────────────────────────────────────────────────────────────────
@@ -820,12 +976,47 @@ if [[ $STACK_CHOICE -eq 3 ]]; then
 
   ok "Python $(python3 --version | cut -d' ' -f2) + pip + venv установлены"
   install_nginx
+  setup_scanbait_jail
 fi
 
 [[ $STACK_CHOICE -eq 4 ]] && ok "Базовый режим — дополнительный стек не устанавливается"
 
 # ── Log rotation ──────────────────────────────────────────────────────────────
 step "Phase 4/4 — Финализация"
+
+# ── auditd + rkhunter (только полный уровень безопасности) ───────────────────
+# Размещено здесь (после Phase 3), а не в Phase 2, намеренно: правило-watch
+# на /var/run/docker.sock требует, чтобы файл УЖЕ существовал на момент
+# augenrules --load, иначе вся загрузка правил падает. К этому моменту Docker
+# (если выбран) уже установлен и сокет на месте.
+if [[ "$SEC_LEVEL" -eq 2 ]]; then
+  info "Устанавливаем auditd..."
+  retry apt-get install -y -qq auditd audispd-plugins > /dev/null 2>&1
+  AUDIT_RULES="/etc/audit/rules.d/99-serverinit.rules"
+  if [[ ! -f "$AUDIT_RULES" ]]; then
+    {
+      echo "# ServerInit — baseline watch rules"
+      [[ -S /var/run/docker.sock ]] && echo "-w /var/run/docker.sock -p rwxa -k docker_sock_access"
+      [[ -d /root/.ssh ]]           && echo "-w /root/.ssh -p rwxa -k ssh_key_access"
+      echo "-w /etc/passwd -p wa -k passwd_changes"
+      echo "-w /etc/shadow -p wa -k shadow_changes"
+      echo "-w /etc/sudoers -p wa -k sudoers_changes"
+    } > "$AUDIT_RULES"
+    systemctl enable auditd --now > /dev/null 2>&1
+    augenrules --load > /dev/null 2>&1 || service auditd restart > /dev/null 2>&1 || true
+    ok "auditd настроен (watch: docker.sock*, ~/.ssh, passwd/shadow/sudoers) [*если Docker установлен]"
+  else
+    ok "auditd правила уже существуют — пропущено"
+  fi
+
+  info "Устанавливаем rkhunter (полный скан — в фоне, не блокирует установку)..."
+  retry apt-get install -y -qq rkhunter > /dev/null 2>&1
+  rkhunter --update   > /dev/null 2>&1 || true
+  rkhunter --propupd  > /dev/null 2>&1 || true
+  nohup rkhunter --check --sk > /root/rkhunter_report.log 2>&1 &
+  ok "rkhunter установлен, baseline зафиксирован, полный скан идёт в фоне → /root/rkhunter_report.log"
+fi
+
 cat > /etc/logrotate.d/serverinit-apps << 'EOF'
 /var/log/apps/*.log {
   daily
@@ -869,15 +1060,17 @@ SSH порт:       $SSH_PORT
   ✔ UFW (порты: $SSH_PORT, 80, 443)
 $([ "$SEC_LEVEL" = "2" ] && echo "  ✔ fail2ban (SSH: 3 попытки, бан 24ч)
   ✔ SSH hardened (порт $SSH_PORT)
-  ✔ unattended-upgrades (security only)" || echo "  — fail2ban (только в полном режиме)")
-$([ "$STACK_CHOICE" = "1" ] && echo "  ✔ Docker + Docker Compose Plugin
-  ✔ Nginx (worker_processes auto)
+  ✔ unattended-upgrades (security only$([ "$STACK_CHOICE" = "1" ] && echo " + Docker"))
+  ✔ auditd (docker.sock, ~/.ssh, passwd/shadow/sudoers)
+  ✔ rkhunter (baseline + фоновый скан → /root/rkhunter_report.log)" || echo "  — fail2ban/auditd/rkhunter (только в полном режиме)")
+$([ "$STACK_CHOICE" = "1" ] && echo "  ✔ Docker (live-restore, no-new-privileges) + Docker Compose Plugin
+  ✔ Nginx (worker_processes auto, hardening, gzip)
   ✔ iptables DOCKER-USER защита")
-$([ "$STACK_CHOICE" = "2" ] && echo "  ✔ Node.js LTS ${NODE_LTS} via NVM ${NVM_VERSION} (пользователь: ${SUDO_USER:-root})
+$([ "$STACK_CHOICE" = "2" ] && echo "  ✔ Node.js ${NODE_INSTALLED_VERSION:-LTS} via NVM ${NVM_VERSION} (последний LTS, пользователь: ${SUDO_USER:-root})
   ✔ PM2 + systemd startup
-  ✔ Nginx (worker_processes auto)")
+  ✔ Nginx (worker_processes auto, hardening, gzip)")
 $([ "$STACK_CHOICE" = "3" ] && echo "  ✔ Python 3 + pip + venv + pipx
-  ✔ Nginx (worker_processes auto)")
+  ✔ Nginx (worker_processes auto, hardening, gzip)")
   ✔ Logrotate (/var/log/apps/)
   ✔ Лог установки: $LOG_FILE
 

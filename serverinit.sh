@@ -524,7 +524,12 @@ fi
 # ── sysctl kernel tuning ──────────────────────────────────────────────────────
 step "Оптимизация ядра (sysctl)"
 SYSCTL_CONF="/etc/sysctl.d/99-serverinit.conf"
-SYSCTL_DESIRED=$(cat << 'EOF'
+
+# Idempotent: only update if changed
+if [[ -f "$SYSCTL_CONF" ]]; then
+  # File exists, check if we need to update
+  _temp_sysctl=$(mktemp)
+  cat > "$_temp_sysctl" << 'EOF'
 # ServerInit — kernel tuning
 
 # Swap aggressiveness (prefer RAM over swap)
@@ -564,14 +569,58 @@ net.ipv4.conf.all.log_martians=1
 net.ipv4.conf.all.accept_source_route=0
 net.ipv6.conf.all.accept_source_route=0
 EOF
-)
 
-# Idempotent: only update if changed
-if [[ -f "$SYSCTL_CONF" ]] && echo "$SYSCTL_DESIRED" | diff -q - "$SYSCTL_CONF" > /dev/null 2>&1; then
-  ok "sysctl уже настроен ($SYSCTL_CONF) — без изменений"
+  if diff -q "$_temp_sysctl" "$SYSCTL_CONF" > /dev/null 2>&1; then
+    ok "sysctl уже настроен ($SYSCTL_CONF) — без изменений"
+    rm -f "$_temp_sysctl"
+  else
+    mv "$_temp_sysctl" "$SYSCTL_CONF"
+    sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1 || true
+    ok "sysctl применён ($SYSCTL_CONF)"
+  fi
 else
-  echo "$SYSCTL_DESIRED" > "$SYSCTL_CONF"
-  sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1
+  # File doesn't exist, create it
+  cat > "$SYSCTL_CONF" << 'EOF'
+# ServerInit — kernel tuning
+
+# Swap aggressiveness (prefer RAM over swap)
+vm.swappiness=10
+vm.vfs_cache_pressure=50
+
+# Network performance
+net.core.somaxconn=65535
+net.core.netdev_max_backlog=65535
+net.ipv4.tcp_max_syn_backlog=8192
+# tcp_tw_reuse: safe on kernel >= 4.19; silently ignored on older kernels
+net.ipv4.tcp_tw_reuse=1
+net.ipv4.tcp_fin_timeout=15
+net.ipv4.ip_local_port_range=1024 65535
+net.ipv4.tcp_rmem=4096 87380 134217728
+net.ipv4.tcp_wmem=4096 65536 134217728
+net.core.rmem_max=134217728
+net.core.wmem_max=134217728
+
+# File descriptors
+fs.file-max=2097152
+fs.inotify.max_user_watches=524288
+
+# SYN flood protection
+net.ipv4.tcp_syncookies=1
+net.ipv4.tcp_syn_retries=2
+net.ipv4.tcp_synack_retries=2
+
+# Disable ICMP redirects
+net.ipv4.conf.all.accept_redirects=0
+net.ipv6.conf.all.accept_redirects=0
+
+# Anti-spoofing (reverse path filter, strict) + логирование martian-пакетов
+net.ipv4.conf.default.rp_filter=1
+net.ipv4.conf.all.rp_filter=1
+net.ipv4.conf.all.log_martians=1
+net.ipv4.conf.all.accept_source_route=0
+net.ipv6.conf.all.accept_source_route=0
+EOF
+  sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1 || true
   ok "sysctl применён ($SYSCTL_CONF)"
 fi
 

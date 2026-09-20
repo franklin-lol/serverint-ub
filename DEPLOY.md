@@ -20,6 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serv
 | `SI_STACK` | `1` Docker · `2` Node.js · `3` Python · `4` Base | `1` |
 | `SI_SEC` | `1` Basic · `2` Full | `1` |
 | `SI_SSH_PORT` | `1024–65535` | `22` |
+| `SI_NGINX` | `0` Skip · `1` Install · `auto` Auto-detect | `auto` |
 
 ### Recipes
 
@@ -29,6 +30,9 @@ SI_STACK=1 SI_SEC=1 sudo bash serverinit.sh --ci
 
 # Docker + full security, port 2222
 SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+
+# Docker without nginx (nginx in container)
+SI_STACK=1 SI_SEC=2 SI_NGINX=0 sudo bash serverinit.sh --ci
 
 # Node.js + full security
 SI_STACK=2 SI_SEC=2 sudo bash serverinit.sh --ci
@@ -55,6 +59,7 @@ SI_STACK=4 SI_SEC=2 sudo bash serverinit.sh --ci
     SI_STACK: "1"
     SI_SEC:   "2"
     SI_SSH_PORT: "2222"
+    SI_NGINX: "0"
   args:
     executable: /bin/bash
 ```
@@ -65,7 +70,7 @@ SI_STACK=4 SI_SEC=2 sudo bash serverinit.sh --ci
 #cloud-config
 runcmd:
   - curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh -o /tmp/si.sh
-  - SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 bash /tmp/si.sh --ci
+  - SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 SI_NGINX=0 bash /tmp/si.sh --ci
   - rm -f /tmp/si.sh
 ```
 
@@ -75,7 +80,7 @@ runcmd:
 provisioner "remote-exec" {
   inline = [
     "curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serverinit.sh -o /tmp/si.sh",
-    "SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash /tmp/si.sh --ci",
+    "SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 SI_NGINX=0 sudo bash /tmp/si.sh --ci",
     "rm -f /tmp/si.sh"
   ]
 }

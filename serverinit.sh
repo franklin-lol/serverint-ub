@@ -14,11 +14,12 @@
 set -Eeuo pipefail
 
 # ── CI / Unattended mode ──────────────────────────────────────────────────────
-# Usage:  SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+# Usage:  SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 SI_NGINX=1 sudo bash serverinit.sh --ci
 #
 # SI_STACK:     1=Docker  2=Node.js  3=Python  4=Base only  (default: 1)
 # SI_SEC:       1=Basic   2=Full (+fail2ban +SSH hardening)  (default: 1)
 # SI_SSH_PORT:  1024–65535, only used when SI_SEC=2           (default: 22)
+# SI_NGINX:     0=Skip nginx  1=Install nginx (default: auto — install for stacks 1/2/3, skip for 4)
 CI_MODE=0
 for _arg in "$@"; do [[ "$_arg" == "--ci" ]] && CI_MODE=1; done
 
@@ -56,8 +57,8 @@ if [[ $CI_MODE -eq 0 ]]; then
   fi
 fi
 
-# Cleanup old logs (keep only last 5)
-find /root -maxdepth 1 -name "serverinit_*.log" -type f | sort -r | tail -n +6 | xargs rm -f 2>/dev/null || true
+# Cleanup old logs (keep only last 5) — safe with whitespace in filenames
+find /root -maxdepth 1 -name "serverinit_*.log" -type f -print0 | sort -zr | tail -zn +6 | xargs -0 rm -f 2>/dev/null || true
 
 LOG_FILE="/root/serverinit_$(date +%Y%m%d_%H%M%S).log"
 exec 3>&1
@@ -76,17 +77,25 @@ ask() {
   printf -v "$var_name" '%s' "$val"
 }
 
-# Retry wrapper: up to 3 attempts with exponential backoff.
-# Covers transient network failures during apt operations.
+# Retry wrapper: delegates to apt's built-in retry mechanism where possible.
+# For non-apt commands, uses exponential backoff (3 attempts max).
 retry() {
-  local n=3 delay=5 attempt=1
-  until "$@"; do
-    [[ $attempt -ge $n ]] && err "Не удалось выполнить после $n попыток: $*"
-    warn "Попытка $attempt/$n не удалась, повтор через ${delay}с..."
-    sleep "$delay"
-    delay=$((delay * 2))
-    attempt=$((attempt + 1))
-  done
+  local cmd="$1"
+  if [[ "$cmd" == "apt-get" ]]; then
+    # Use apt's native retry — more efficient than bash loop
+    shift
+    apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=10 "$@"
+  else
+    # Generic retry with exponential backoff
+    local n=3 delay=5 attempt=1
+    until "$@"; do
+      [[ $attempt -ge $n ]] && err "Не удалось выполнить после $n попыток: $*"
+      warn "Попытка $attempt/$n не удалась, повтор через ${delay}с..."
+      sleep "$delay"
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+    done
+  fi
 }
 
 # Portable SSH service restart: Ubuntu uses 'ssh', Debian uses 'sshd',
@@ -101,13 +110,32 @@ restart_ssh() {
 }
 
 # Nginx install helper — idempotent, called by stack installers.
+# Skip if SI_NGINX=0 or if nginx is already configured by user (detected via custom sites-enabled).
 install_nginx() {
+  # Respect SI_NGINX override
+  if [[ "${SI_NGINX:-auto}" == "0" ]]; then
+    info "Nginx: пропущен (SI_NGINX=0)"
+    return 0
+  fi
+
+  # Detect if nginx is already managed by user (custom configs in sites-enabled)
+  if [[ -d /etc/nginx/sites-enabled ]] && compgen -G "/etc/nginx/sites-enabled/*" > /dev/null; then
+    local custom_sites=$(find /etc/nginx/sites-enabled -type f -o -type l | wc -l)
+    if [[ $custom_sites -gt 1 ]] || ! grep -q "default" /etc/nginx/sites-enabled/* 2>/dev/null; then
+      warn "Nginx: найдены пользовательские конфиги ($custom_sites sites) — пропускаем установку/настройку"
+      return 0
+    fi
+  fi
+
   if ! command -v nginx &>/dev/null; then
     info "Устанавливаем Nginx..."
     retry apt-get install -y -qq nginx > /dev/null 2>&1
     systemctl enable nginx > /dev/null 2>&1
     systemctl start  nginx > /dev/null 2>&1
-    sed -i "s/^worker_processes .*/worker_processes auto;/" /etc/nginx/nginx.conf
+    # Only modify worker_processes if it's still default (1 or auto)
+    if grep -qE "^worker_processes\s+(1|auto);" /etc/nginx/nginx.conf 2>/dev/null; then
+      sed -i "s/^worker_processes .*/worker_processes auto;/" /etc/nginx/nginx.conf
+    fi
     ok "Nginx установлен и запущен"
   else
     ok "Nginx уже установлен"
@@ -203,7 +231,9 @@ setup_scanbait_jail() {
 
   cat > /etc/fail2ban/filter.d/nginx-scanbait.conf << 'EOF'
 [Definition]
-failregex = ^<HOST> -.*"(GET|POST) /(\.env|\.aws|\.azure|\.git|wp-admin|wp-content|wp-json|wp-config|phpmyadmin|admingui|actuator|_ignition|\.streamlit|terraform\.tfstate|sftp-config|secrets\.yml|docker-compose\.yml|serverless\.yml|application\.yml|appsettings|gradle\.properties|ecosystem\.config|\.sentryclirc|server-status|server-info|jkstatus|jkmanager|cgi-bin)[^"]*" \d+
+# Path traversal protection: catch /../, /%2e%2e/, encoded variants
+# Scanbait: common reconnaissance paths (.env, .git, wp-admin, terraform, k8s secrets, etc.)
+failregex = ^<HOST> -.*"(GET|POST|HEAD) /(\.\.\/|%2e%2e\/|%252e%252e\/|\.env|\.aws|\.azure|\.git|\.svn|\.hg|wp-admin|wp-content|wp-json|wp-config|phpmyadmin|adminer|admingui|actuator|_ignition|\.streamlit|terraform\.tfstate|sftp-config|secrets\.yml|docker-compose\.yml|serverless\.yml|application\.yml|appsettings|gradle\.properties|ecosystem\.config|\.sentryclirc|server-status|server-info|jkstatus|jkmanager|cgi-bin|\.kube|kubeconfig)[^"]*" \d+
 ignoreregex =
 EOF
 
@@ -219,7 +249,7 @@ bantime  = 86400
 EOF
 
   systemctl reload fail2ban > /dev/null 2>&1 || systemctl restart fail2ban > /dev/null 2>&1
-  ok "fail2ban: jail nginx-scanbait добавлен (сканеры .env/.git/wp-admin/terraform.tfstate и т.п. banятся)"
+  ok "fail2ban: jail nginx-scanbait добавлен (path traversal + .env/.git/wp-admin/k8s/terraform)"
 }
 
 # Trap: show where the script died and point to the log.
@@ -324,15 +354,25 @@ if [[ $CI_MODE -eq 1 ]]; then
   STACK_CHOICE="${SI_STACK:-1}"
   SEC_LEVEL="${SI_SEC:-1}"
   SSH_PORT="${SI_SSH_PORT:-22}"
+  INSTALL_NGINX="${SI_NGINX:-auto}"
 
   [[ "$STACK_CHOICE" =~ ^[1-4]$ ]] || err "SI_STACK must be 1–4 (got: $STACK_CHOICE)"
   [[ "$SEC_LEVEL"    =~ ^[1-2]$ ]] || err "SI_SEC must be 1 or 2 (got: $SEC_LEVEL)"
+  [[ "$INSTALL_NGINX" =~ ^(0|1|auto)$ ]] || err "SI_NGINX must be 0, 1, or auto (got: $INSTALL_NGINX)"
+
   if [[ $SEC_LEVEL -eq 2 && "$SSH_PORT" != "22" ]]; then
     [[ "$SSH_PORT" =~ ^[0-9]+$ && $SSH_PORT -ge 1024 && $SSH_PORT -le 65535 ]] \
       || err "SI_SSH_PORT must be 1024–65535 (got: $SSH_PORT)"
     warn "CI: SSH будет перенесён на порт $SSH_PORT — убедись, что порт открыт у хостера!"
   fi
-  info "CI mode: STACK=$STACK_CHOICE  SEC=$SEC_LEVEL  SSH_PORT=$SSH_PORT"
+
+  # Auto-resolve SI_NGINX: stacks 1/2/3 default to nginx, stack 4 (base) skips it
+  if [[ "$INSTALL_NGINX" == "auto" ]]; then
+    [[ $STACK_CHOICE -le 3 ]] && INSTALL_NGINX=1 || INSTALL_NGINX=0
+  fi
+  SI_NGINX="$INSTALL_NGINX"  # Export for install_nginx() check
+
+  info "CI mode: STACK=$STACK_CHOICE  SEC=$SEC_LEVEL  SSH_PORT=$SSH_PORT  NGINX=$SI_NGINX"
 
 else
   # ── Interactive mode: three questions ─────────────────────────────────────
@@ -380,6 +420,17 @@ else
   else
     echo -e "${W}  Q3. SSH-порт:${NC}"
     echo -e "  ${DIM}Пропускается — доступно только в полном режиме безопасности${NC}"
+  fi
+
+  # Interactive: ask about nginx only for stack 1 (Docker — nginx might be in container)
+  SI_NGINX=1  # Default: install nginx
+  if [[ $STACK_CHOICE -eq 1 ]]; then
+    echo ""
+    echo -e "${W}  Дополнительно: Nginx на хосте?${NC}"
+    echo -e "  ${DIM}Docker стек: nginx может быть в контейнере (тогда на хосте не нужен)${NC}"
+    NGINX_INPUT=""
+    ask NGINX_INPUT "  Установить Nginx на хост? [Y/n]: "
+    [[ "$NGINX_INPUT" =~ ^[nNнН]$ ]] && SI_NGINX=0
   fi
 fi
 
@@ -469,7 +520,7 @@ fi
 # ── sysctl kernel tuning ──────────────────────────────────────────────────────
 step "Оптимизация ядра (sysctl)"
 SYSCTL_CONF="/etc/sysctl.d/99-serverinit.conf"
-cat > "$SYSCTL_CONF" << 'EOF'
+SYSCTL_DESIRED=$(cat << 'EOF'
 # ServerInit — kernel tuning
 
 # Swap aggressiveness (prefer RAM over swap)
@@ -509,9 +560,16 @@ net.ipv4.conf.all.log_martians=1
 net.ipv4.conf.all.accept_source_route=0
 net.ipv6.conf.all.accept_source_route=0
 EOF
+)
 
-sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1
-ok "sysctl применён ($SYSCTL_CONF)"
+# Idempotent: only update if changed
+if [[ -f "$SYSCTL_CONF" ]] && echo "$SYSCTL_DESIRED" | diff -q - "$SYSCTL_CONF" > /dev/null 2>&1; then
+  ok "sysctl уже настроен ($SYSCTL_CONF) — без изменений"
+else
+  echo "$SYSCTL_DESIRED" > "$SYSCTL_CONF"
+  sysctl -p "$SYSCTL_CONF" > /dev/null 2>&1
+  ok "sysctl применён ($SYSCTL_CONF)"
+fi
 
 # ── File descriptor limits ────────────────────────────────────────────────────
 LIMITS_CONF="/etc/security/limits.d/99-serverinit.conf"
@@ -664,6 +722,22 @@ MaxStartups 10:30:60
 DROPIN
       ok "Авторитетный drop-in создан: $SSHD_DROPIN_DIR/99-serverinit.conf"
       ok "PasswordAuthentication=$PASSWD_AUTH_VAL перекроет cloud-init и всё прочее"
+
+      # ── DPkg hook: restore drop-in after openssh-server updates ────────────
+      # Cloud-init can regenerate 50-cloud-init.conf on package updates.
+      # This hook ensures our 99-serverinit.conf survives and stays authoritative.
+      DPKG_HOOK="/etc/apt/apt.conf.d/99-serverinit-ssh-preserve"
+      if [[ ! -f "$DPKG_HOOK" ]]; then
+        cat > "$DPKG_HOOK" << DPKGHOOK
+// ServerInit — Preserve SSH hardening after openssh-server updates
+DPkg::Post-Invoke {
+  "if [ -d $SSHD_DROPIN_DIR ] && [ -f $SSHD_DROPIN_DIR/99-serverinit.conf.bak ]; then cp -f $SSHD_DROPIN_DIR/99-serverinit.conf.bak $SSHD_DROPIN_DIR/99-serverinit.conf 2>/dev/null || true; fi";
+};
+DPKGHOOK
+        # Backup the drop-in for the hook to restore
+        cp "$SSHD_DROPIN_DIR/99-serverinit.conf" "$SSHD_DROPIN_DIR/99-serverinit.conf.bak"
+        ok "DPkg hook создан — SSH config защищён от перезаписи при обновлениях"
+      fi
     else
       warn "Директория $SSHD_DROPIN_DIR не найдена — применено только в sshd_config"
     fi
@@ -823,7 +897,7 @@ SHIM
     ok "Shim /usr/local/bin/docker-compose уже существует"
   fi
 
-  # Merge daemon.json — don't overwrite existing config
+  # Merge daemon.json — don't overwrite existing config, use deep merge
   DOCKER_DAEMON="/etc/docker/daemon.json"
   mkdir -p /etc/docker
   # live-restore: контейнеры переживают рестарт/апдейт dockerd без даунтайма.
@@ -842,51 +916,77 @@ SHIM
     ok "Docker daemon оптимизирован (логи: 10MB × 3, live-restore, no-new-privileges)"
     systemctl reload-or-restart docker > /dev/null 2>&1 || true
   else
-    # Не перезаписываем существующий конфиг целиком — добавляем ТОЛЬКО
-    # недостающие ключи через jq (уже установлен в Phase 1). Любое значение,
-    # которое администратор уже задал сам, побеждает и не трогается.
+    # Deep merge using Python (jq can't do recursive merge reliably)
     DOCKER_DAEMON_TMP="$(mktemp)"
-    if jq -s '.[0] * .[1]' <(echo "$DOCKER_DEFAULTS") "$DOCKER_DAEMON" > "$DOCKER_DAEMON_TMP" 2>/dev/null \
-       && jq empty "$DOCKER_DAEMON_TMP" 2>/dev/null; then
+    python3 -c '
+import json, sys
+def deep_merge(base, overlay):
+    """Recursively merge overlay into base, preserving existing values."""
+    result = base.copy()
+    for key, val in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
+            result[key] = deep_merge(result[key], val)
+        elif key not in result:
+            result[key] = val
+    return result
+
+try:
+    with open("'"$DOCKER_DAEMON"'") as f:
+        existing = json.load(f)
+    defaults = json.loads('"'"'$(echo "$DOCKER_DEFAULTS" | tr -d '\n')'"'"')
+    merged = deep_merge(existing, defaults)
+    with open("'"$DOCKER_DAEMON_TMP"'", "w") as f:
+        json.dump(merged, f, indent=2)
+except Exception as e:
+    sys.exit(1)
+' 2>/dev/null
+
+    if [[ $? -eq 0 ]] && python3 -m json.tool "$DOCKER_DAEMON_TMP" > /dev/null 2>&1; then
       if diff -q "$DOCKER_DAEMON" "$DOCKER_DAEMON_TMP" > /dev/null 2>&1; then
         ok "daemon.json уже содержит все нужные ключи — без изменений"
       else
         cp "$DOCKER_DAEMON" "${DOCKER_DAEMON}.bak.$(date +%s)"
         mv "$DOCKER_DAEMON_TMP" "$DOCKER_DAEMON"
-        ok "daemon.json дополнен недостающими ключами (бэкап рядом, *.bak.*)"
+        ok "daemon.json дополнен недостающими ключами (deep merge, бэкап рядом *.bak.*)"
         systemctl reload-or-restart docker > /dev/null 2>&1 || true
       fi
     else
       rm -f "$DOCKER_DAEMON_TMP"
-      warn "daemon.json существует, но jq не смог его безопасно смёрджить (невалидный JSON?) — не трогаем. Проверь вручную: $DOCKER_DAEMON"
+      warn "daemon.json существует, но не удалось безопасно смёрджить (невалидный JSON?) — не трогаем. Проверь вручную: $DOCKER_DAEMON"
     fi
   fi
 
-  # Docker + UFW: Idempotent rules with correct order using -C check
+  # Docker + UFW: Idempotent rules with correct order using -C check + flock
   if iptables -L DOCKER-USER > /dev/null 2>&1; then
     info "Настраиваем DOCKER-USER цепочку..."
-    
-    # 1. Allow Loopback
-    iptables -C DOCKER-USER -i lo -j ACCEPT 2>/dev/null || \
-      iptables -I DOCKER-USER 1 -i lo -j ACCEPT
-    
-    # 2. Allow Established/Related
-    iptables -C DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
-      iptables -I DOCKER-USER 2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-    # 3. Allow explicitly opened ports (SSH, 80, 443)
-    iptables -C DOCKER-USER -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || \
-      iptables -I DOCKER-USER 3 -p tcp --dport "$SSH_PORT" -j ACCEPT
-    
-    iptables -C DOCKER-USER -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
-      iptables -I DOCKER-USER 4 -p tcp --dport 80 -j ACCEPT
-    
-    iptables -C DOCKER-USER -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
-      iptables -I DOCKER-USER 5 -p tcp --dport 443 -j ACCEPT
+    # Use flock to prevent race conditions during concurrent script runs
+    (
+      flock -x 200 || { warn "Не удалось получить lock на iptables — пропускаем DOCKER-USER настройку"; return 0; }
 
-    # 4. Final DROP (must be at the end)
-    iptables -C DOCKER-USER -j DROP 2>/dev/null || \
-      iptables -A DOCKER-USER -j DROP
+      # 1. Allow Loopback
+      iptables -C DOCKER-USER -i lo -j ACCEPT 2>/dev/null || \
+        iptables -I DOCKER-USER 1 -i lo -j ACCEPT
+
+      # 2. Allow Established/Related
+      iptables -C DOCKER-USER -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || \
+        iptables -I DOCKER-USER 2 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+      # 3. Allow explicitly opened ports (SSH, 80, 443)
+      iptables -C DOCKER-USER -p tcp --dport "$SSH_PORT" -j ACCEPT 2>/dev/null || \
+        iptables -I DOCKER-USER 3 -p tcp --dport "$SSH_PORT" -j ACCEPT
+
+      iptables -C DOCKER-USER -p tcp --dport 80 -j ACCEPT 2>/dev/null || \
+        iptables -I DOCKER-USER 4 -p tcp --dport 80 -j ACCEPT
+
+      iptables -C DOCKER-USER -p tcp --dport 443 -j ACCEPT 2>/dev/null || \
+        iptables -I DOCKER-USER 5 -p tcp --dport 443 -j ACCEPT
+
+      # 4. Final DROP (must be at the end)
+      iptables -C DOCKER-USER -j DROP 2>/dev/null || \
+        iptables -A DOCKER-USER -j DROP
+
+    ) 200>/var/lock/serverinit-iptables.lock
 
     # Persist rules across reboots
     if apt-get install -y -qq iptables-persistent > /dev/null 2>&1; then
@@ -924,17 +1024,37 @@ if [[ $STACK_CHOICE -eq 2 ]]; then
 
   info "Устанавливаем NVM v${NVM_VERSION} + Node.js (последний LTS, --lts) для пользователя '$TARGET_USER'..."
 
+  # Download with SHA256 verification for security
+  NVM_INSTALL_SCRIPT="/tmp/nvm_install_${NVM_VERSION}.sh"
+  NVM_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh"
+
+  curl -fsSL "$NVM_URL" -o "$NVM_INSTALL_SCRIPT" || err "Не удалось скачать NVM install script"
+
+  # Fetch SHA256 checksum from GitHub (if available)
+  NVM_SHA256_URL="https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh.sha256sum"
+  EXPECTED_SHA=$(curl -fsSL --max-time 5 "$NVM_SHA256_URL" 2>/dev/null | awk '{print $1}')
+
+  if [[ -n "$EXPECTED_SHA" ]]; then
+    ACTUAL_SHA=$(sha256sum "$NVM_INSTALL_SCRIPT" | awk '{print $1}')
+    if [[ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]]; then
+      rm -f "$NVM_INSTALL_SCRIPT"
+      err "NVM install script: SHA256 mismatch (expected: $EXPECTED_SHA, got: $ACTUAL_SHA)"
+    fi
+    ok "NVM install script verified (SHA256: ${EXPECTED_SHA:0:16}...)"
+  else
+    warn "SHA256 checksum недоступен для NVM v${NVM_VERSION} — устанавливаем без верификации"
+  fi
+
   # Run everything as the target user to avoid root-owned NVM
   su - "$TARGET_USER" -c "
     export NVM_DIR='$NVM_DIR_PATH'
-    curl -fsSL 'https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh' -o /tmp/nvm_install.sh
-    bash /tmp/nvm_install.sh > /dev/null 2>&1
-    rm -f /tmp/nvm_install.sh
+    bash '$NVM_INSTALL_SCRIPT' > /dev/null 2>&1
     [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"
     nvm install --lts > /dev/null 2>&1
     nvm use     --lts > /dev/null 2>&1
     nvm alias   default \"\$(nvm current)\" > /dev/null 2>&1
   "
+  rm -f "$NVM_INSTALL_SCRIPT"
 
   NODE_INSTALLED_VERSION=$(su - "$TARGET_USER" -c "export NVM_DIR='$NVM_DIR_PATH'; [ -s \"\$NVM_DIR/nvm.sh\" ] && . \"\$NVM_DIR/nvm.sh\"; node --version 2>/dev/null" 2>/dev/null || echo "LTS")
   ok "Node.js $NODE_INSTALLED_VERSION (последний LTS) установлен для '$TARGET_USER'"
@@ -993,7 +1113,30 @@ if [[ "$SEC_LEVEL" -eq 2 ]]; then
   info "Устанавливаем auditd..."
   retry apt-get install -y -qq auditd audispd-plugins > /dev/null 2>&1
   AUDIT_RULES="/etc/audit/rules.d/99-serverinit.rules"
+
+  # Check existing rules to avoid conflicts (idempotent)
+  _should_update_audit=0
   if [[ ! -f "$AUDIT_RULES" ]]; then
+    _should_update_audit=1
+  else
+    # Check if our rules differ from existing
+    _temp_rules=$(mktemp)
+    {
+      echo "# ServerInit — baseline watch rules"
+      [[ -S /var/run/docker.sock ]] && echo "-w /var/run/docker.sock -p rwxa -k docker_sock_access"
+      [[ -d /root/.ssh ]]           && echo "-w /root/.ssh -p rwxa -k ssh_key_access"
+      echo "-w /etc/passwd -p wa -k passwd_changes"
+      echo "-w /etc/shadow -p wa -k shadow_changes"
+      echo "-w /etc/sudoers -p wa -k sudoers_changes"
+    } > "$_temp_rules"
+
+    if ! diff -q "$AUDIT_RULES" "$_temp_rules" > /dev/null 2>&1; then
+      _should_update_audit=1
+    fi
+    rm -f "$_temp_rules"
+  fi
+
+  if [[ $_should_update_audit -eq 1 ]]; then
     {
       echo "# ServerInit — baseline watch rules"
       [[ -S /var/run/docker.sock ]] && echo "-w /var/run/docker.sock -p rwxa -k docker_sock_access"
@@ -1002,19 +1145,25 @@ if [[ "$SEC_LEVEL" -eq 2 ]]; then
       echo "-w /etc/shadow -p wa -k shadow_changes"
       echo "-w /etc/sudoers -p wa -k sudoers_changes"
     } > "$AUDIT_RULES"
+
     systemctl enable auditd --now > /dev/null 2>&1
     augenrules --load > /dev/null 2>&1 || service auditd restart > /dev/null 2>&1 || true
     ok "auditd настроен (watch: docker.sock*, ~/.ssh, passwd/shadow/sudoers) [*если Docker установлен]"
   else
-    ok "auditd правила уже существуют — пропущено"
+    ok "auditd правила уже актуальны — пропущено"
   fi
 
-  info "Устанавливаем rkhunter (полный скан — в фоне, не блокирует установку)..."
+  info "Устанавливаем rkhunter (полный скан — в фоне с timeout, не блокирует установку)..."
   retry apt-get install -y -qq rkhunter > /dev/null 2>&1
   rkhunter --update   > /dev/null 2>&1 || true
   rkhunter --propupd  > /dev/null 2>&1 || true
-  nohup rkhunter --check --sk > /root/rkhunter_report.log 2>&1 &
-  ok "rkhunter установлен, baseline зафиксирован, полный скан идёт в фоне → /root/rkhunter_report.log"
+
+  # Run with timeout to prevent hanging on slow disks (10 min max)
+  (
+    timeout 600 rkhunter --check --sk > /root/rkhunter_report.log 2>&1 || \
+      echo "rkhunter scan timeout/error (exit code: $?)" >> /root/rkhunter_report.log
+  ) &
+  ok "rkhunter установлен, baseline зафиксирован, полный скан идёт в фоне (timeout 10 мин) → /root/rkhunter_report.log"
 fi
 
 cat > /etc/logrotate.d/serverinit-apps << 'EOF'

@@ -103,6 +103,22 @@ result=$(validate_ci 1 2 80 2>/dev/null || echo "ERR"); [[ "$result" != "OK" ]] 
 result=$(validate_ci 1 2 99999 2>/dev/null || echo "ERR"); [[ "$result" != "OK" ]] && pass "Invalid: PORT=99999 rejected (>65535)" || fail "PORT=99999 should be rejected"
 result=$(validate_ci 1 2 abc 2>/dev/null || echo "ERR"); [[ "$result" != "OK" ]] && pass "Invalid: PORT=abc rejected (non-numeric)" || fail "PORT=abc should be rejected"
 
+# Test SI_NGINX validation
+validate_nginx() {
+  local val="$1"
+  bash -c "
+    set -euo pipefail
+    NGINX='$val'
+    [[ \"\$NGINX\" =~ ^(0|1|auto)\$ ]] || { echo 'BAD_NGINX'; exit 1; }
+    echo 'OK'
+  "
+}
+
+result=$(validate_nginx 0);    [[ "$result" == "OK" ]] && pass "Valid: SI_NGINX=0"    || fail "SI_NGINX=0 should be valid"
+result=$(validate_nginx 1);    [[ "$result" == "OK" ]] && pass "Valid: SI_NGINX=1"    || fail "SI_NGINX=1 should be valid"
+result=$(validate_nginx auto); [[ "$result" == "OK" ]] && pass "Valid: SI_NGINX=auto" || fail "SI_NGINX=auto should be valid"
+result=$(validate_nginx 2 2>/dev/null || echo "ERR"); [[ "$result" != "OK" ]] && pass "Invalid: SI_NGINX=2 rejected" || fail "SI_NGINX=2 should be rejected"
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  4. SSH PORT VALIDATION — Interactive range check
 # ══════════════════════════════════════════════════════════════════════════════

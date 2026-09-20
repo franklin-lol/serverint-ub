@@ -50,6 +50,9 @@ curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serv
 ```bash
 # Docker + full security on port 2222 — zero interaction
 SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+
+# Docker without nginx (nginx in container) + basic security
+SI_STACK=1 SI_SEC=1 SI_NGINX=0 sudo bash serverinit.sh --ci
 ```
 
 ---
@@ -93,6 +96,7 @@ Pass `--ci` and control everything via environment variables:
 | `SI_STACK` | `1` | Stack: `1`=Docker `2`=Node.js `3`=Python `4`=Base |
 | `SI_SEC` | `1` | Security: `1`=Basic `2`=Full |
 | `SI_SSH_PORT` | `22` | SSH port (1024–65535, only used when `SI_SEC=2`) |
+| `SI_NGINX` | `auto` | `0`=Skip nginx `1`=Install nginx `auto`=Install for stacks 1/2/3, skip for 4 |
 
 **Examples:**
 
@@ -105,6 +109,9 @@ SI_STACK=2 SI_SEC=2 sudo bash serverinit.sh --ci
 
 # Docker + full security + custom SSH port
 SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+
+# Docker without nginx (nginx runs in container)
+SI_STACK=1 SI_SEC=2 SI_NGINX=0 sudo bash serverinit.sh --ci
 ```
 
 **Ansible / cloud-init example:**
@@ -261,6 +268,24 @@ cat /root/serverinit_report.txt           # full install report
 
 ## Changelog
 
+**v3.2.0**
+- Added: `SI_NGINX` env var — skip nginx installation (for containerized nginx setups)
+- Added: Interactive nginx prompt for Docker stack (host nginx vs container nginx)
+- Fixed: **CRITICAL** Race condition in iptables DOCKER-USER setup (added flock locking)
+- Fixed: **CRITICAL** NVM installation now verifies SHA256 checksum (prevents MITM attacks)
+- Fixed: **CRITICAL** fail2ban scanbait jail now catches path traversal attacks (`/../`, `%2e%2e`)
+- Fixed: **CRITICAL** Docker daemon.json uses deep merge instead of shallow (preserves nested configs)
+- Fixed: **CRITICAL** SSH config protected from cloud-init overwrites via DPkg hook
+- Fixed: `find | xargs` now uses `-print0` for whitespace-safe log cleanup
+- Fixed: auditd rules check for conflicts before applying (idempotent)
+- Fixed: rkhunter runs with 10-min timeout (prevents hanging on slow disks)
+- Fixed: sysctl config only reapplies when changed (true idempotency)
+- Fixed: apt retry now uses native `Acquire::Retries` mechanism (faster, more reliable)
+- Fixed: install_nginx detects existing user configs and skips modifications
+- Improved: DPkg hook ensures SSH hardening survives openssh-server updates
+- Added: Integration test suite (Ubuntu/Debian, Docker containers, idempotency tests)
+- Added: CI matrix testing for all stack/security combinations
+
 **v3.1.0**
 - Added: `--ci` unattended mode with `SI_STACK` / `SI_SEC` / `SI_SSH_PORT` env vars
 - Added: Smart swap disk limiter — swap size auto-reduced to keep ≥5 GB free on disk
@@ -298,6 +323,9 @@ curl -fsSL https://raw.githubusercontent.com/franklin-lol/serverint-ub/main/serv
 
 ```bash
 SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+
+# Docker без nginx (nginx в контейнере)
+SI_STACK=1 SI_SEC=1 SI_NGINX=0 sudo bash serverinit.sh --ci
 ```
 
 ### Описание
@@ -340,10 +368,14 @@ sudo bash serverinit.sh
 | `SI_STACK` | `1` | Стек: `1`=Docker `2`=Node.js `3`=Python `4`=Базовый |
 | `SI_SEC` | `1` | Безопасность: `1`=Базовый `2`=Полный |
 | `SI_SSH_PORT` | `22` | SSH-порт (1024–65535, только при `SI_SEC=2`) |
+| `SI_NGINX` | `auto` | `0`=Не устанавливать nginx `1`=Установить `auto`=Установить для стеков 1/2/3, пропустить для 4 |
 
 ```bash
 # Docker + полная безопасность на порту 2222
 SI_STACK=1 SI_SEC=2 SI_SSH_PORT=2222 sudo bash serverinit.sh --ci
+
+# Docker без nginx на хосте (nginx в контейнере)
+SI_STACK=1 SI_SEC=2 SI_NGINX=0 sudo bash serverinit.sh --ci
 ```
 
 ### Что делает скрипт

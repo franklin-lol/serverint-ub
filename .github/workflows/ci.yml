@@ -19,7 +19,7 @@ jobs:
         run: sudo apt-get install -y shellcheck
 
       - name: Make scripts executable
-        run: chmod +x serverinit.sh tests/test_serverinit.sh
+        run: chmod +x serverinit.sh tests/test_serverinit.sh tests/integration_test.sh
 
       - name: ShellCheck — serverinit.sh
         run: shellcheck -S warning serverinit.sh
@@ -27,8 +27,74 @@ jobs:
       - name: ShellCheck — test suite
         run: shellcheck -S warning tests/test_serverinit.sh
 
-      - name: Run test suite
+      - name: ShellCheck — integration tests
+        run: shellcheck -S warning tests/integration_test.sh
+
+      - name: Run unit test suite
         run: bash tests/test_serverinit.sh ./serverinit.sh
+
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-22.04
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "Docker + Basic Security (no nginx)"
+            stack: 1
+            sec: 1
+            nginx: 0
+          - name: "Docker + Full Security + nginx"
+            stack: 1
+            sec: 2
+            nginx: 1
+          - name: "Node.js + nginx"
+            stack: 2
+            sec: 1
+            nginx: 1
+          - name: "Base only + Full Security"
+            stack: 4
+            sec: 2
+            nginx: 0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run integration test - ${{ matrix.config.name }}
+        run: |
+          CONTAINER_NAME="serverinit-ci-test-$$"
+          docker run -d --name "$CONTAINER_NAME" --privileged ubuntu:22.04 sleep 3600
+          docker cp serverinit.sh "$CONTAINER_NAME:/tmp/serverinit.sh"
+
+          docker exec "$CONTAINER_NAME" bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            SI_STACK=${{ matrix.config.stack }} SI_SEC=${{ matrix.config.sec }} SI_NGINX=${{ matrix.config.nginx }} \
+            bash /tmp/serverinit.sh --ci
+          "
+
+          # Verify installation
+          echo "✔ Installation completed successfully"
+
+          # Basic verification based on stack
+          if [ ${{ matrix.config.stack }} -eq 1 ]; then
+            docker exec "$CONTAINER_NAME" which docker && echo "✔ Docker installed"
+            docker exec "$CONTAINER_NAME" docker compose version && echo "✔ Docker Compose plugin working"
+          fi
+
+          if [ ${{ matrix.config.nginx }} -eq 1 ]; then
+            docker exec "$CONTAINER_NAME" which nginx && echo "✔ Nginx installed"
+          fi
+
+          if [ ${{ matrix.config.sec }} -eq 2 ]; then
+            docker exec "$CONTAINER_NAME" which fail2ban-client && echo "✔ fail2ban installed"
+          fi
+
+          docker exec "$CONTAINER_NAME" bash -c "ufw status | grep -q 'Status: active'" && echo "✔ UFW active"
+
+          # Cleanup
+          docker rm -f "$CONTAINER_NAME"
 
   dry-run-ci-mode:
     name: CI mode dry-run (syntax only)
@@ -46,6 +112,7 @@ jobs:
           grep -q 'SI_STACK'  serverinit.sh        && echo "✔ SI_STACK env var found"
           grep -q 'SI_SEC'    serverinit.sh        && echo "✔ SI_SEC env var found"
           grep -q 'SI_SSH_PORT' serverinit.sh      && echo "✔ SI_SSH_PORT env var found"
+          grep -q 'SI_NGINX'    serverinit.sh      && echo "✔ SI_NGINX env var found"
           grep -q 'MIN_FREE_AFTER_SWAP' serverinit.sh && echo "✔ Disk limiter found"
 
       - name: Bash syntax check

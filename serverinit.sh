@@ -120,7 +120,8 @@ install_nginx() {
 
   # Detect if nginx is already managed by user (custom configs in sites-enabled)
   if [[ -d /etc/nginx/sites-enabled ]] && compgen -G "/etc/nginx/sites-enabled/*" > /dev/null; then
-    local custom_sites=$(find /etc/nginx/sites-enabled -type f -o -type l | wc -l)
+    local custom_sites
+    custom_sites=$(find /etc/nginx/sites-enabled -type f -o -type l | wc -l)
     if [[ $custom_sites -gt 1 ]] || ! grep -q "default" /etc/nginx/sites-enabled/* 2>/dev/null; then
       warn "Nginx: найдены пользовательские конфиги ($custom_sites sites) — пропускаем установку/настройку"
       return 0
@@ -918,10 +919,11 @@ SHIM
   else
     # Deep merge using Python (jq can't do recursive merge reliably)
     DOCKER_DAEMON_TMP="$(mktemp)"
-    python3 -c '
+    DOCKER_DEFAULTS_ESCAPED=$(echo "$DOCKER_DEFAULTS" | tr -d '\n' | sed 's/"/\\"/g')
+    python3 -c "
 import json, sys
 def deep_merge(base, overlay):
-    """Recursively merge overlay into base, preserving existing values."""
+    \"\"\"Recursively merge overlay into base, preserving existing values.\"\"\"
     result = base.copy()
     for key, val in overlay.items():
         if key in result and isinstance(result[key], dict) and isinstance(val, dict):
@@ -931,15 +933,15 @@ def deep_merge(base, overlay):
     return result
 
 try:
-    with open("'"$DOCKER_DAEMON"'") as f:
+    with open('$DOCKER_DAEMON') as f:
         existing = json.load(f)
-    defaults = json.loads('"'"'$(echo "$DOCKER_DEFAULTS" | tr -d '\n')'"'"')
+    defaults = json.loads(\"$DOCKER_DEFAULTS_ESCAPED\")
     merged = deep_merge(existing, defaults)
-    with open("'"$DOCKER_DAEMON_TMP"'", "w") as f:
+    with open('$DOCKER_DAEMON_TMP', 'w') as f:
         json.dump(merged, f, indent=2)
 except Exception as e:
     sys.exit(1)
-' 2>/dev/null
+" 2>/dev/null
 
     if [[ $? -eq 0 ]] && python3 -m json.tool "$DOCKER_DAEMON_TMP" > /dev/null 2>&1; then
       if diff -q "$DOCKER_DAEMON" "$DOCKER_DAEMON_TMP" > /dev/null 2>&1; then

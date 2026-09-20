@@ -667,7 +667,7 @@ if [[ $SEC_LEVEL -eq 2 ]]; then
 
   # Fail2ban
   info "Устанавливаем fail2ban..."
-  retry apt-get install -y -qq fail2ban > /dev/null 2>&1
+  retry apt-get install -y -qq fail2ban iptables > /dev/null 2>&1
 
   # Detect correct auth log path (Ubuntu 22.04+ uses systemd journal)
   if [[ -f /var/log/auth.log ]]; then
@@ -691,8 +691,12 @@ logpath  = $AUTH_LOG
 maxretry = 3
 bantime  = 86400
 EOF
-  systemctl enable fail2ban  > /dev/null 2>&1
-  systemctl restart fail2ban > /dev/null 2>&1
+
+  # Try to start fail2ban, but don't fail if systemd unavailable (containers)
+  systemctl enable fail2ban  > /dev/null 2>&1 || true
+  systemctl restart fail2ban > /dev/null 2>&1 || {
+    warn "fail2ban: systemd недоступен (контейнер?) — настроен, но не запущен"
+  }
   ok "fail2ban настроен (SSH: max 3 попытки, бан 24ч)"
 
   # SSH hardening
@@ -899,12 +903,13 @@ https://download.docker.com/linux/$_OS_ID $_OS_CODENAME stable" \
     retry apt-get install -y -qq \
       docker-ce docker-ce-cli containerd.io \
       docker-buildx-plugin docker-compose-plugin \
+      iptables \
       > /dev/null 2>&1
-    systemctl enable docker > /dev/null 2>&1
-    systemctl start  docker > /dev/null 2>&1
+    systemctl enable docker > /dev/null 2>&1 || true
+    systemctl start  docker > /dev/null 2>&1 || true
     SUDO_USER_NAME="${SUDO_USER:-}"
     [[ -n "$SUDO_USER_NAME" ]] && usermod -aG docker "$SUDO_USER_NAME" 2>/dev/null || true
-    ok "Docker $(docker --version | cut -d' ' -f3 | tr -d ',') установлен"
+    ok "Docker $(docker --version 2>/dev/null | cut -d' ' -f3 | tr -d ',' || echo 'installed') установлен"
   fi
 
   # ── Remove legacy docker-compose v1 ──────────────────────────────────────────

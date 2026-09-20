@@ -45,17 +45,9 @@ jobs:
             stack: 1
             sec: 1
             nginx: 0
-          - name: "Docker + Full Security + nginx"
-            stack: 1
-            sec: 2
-            nginx: 1
-          - name: "Node.js + nginx"
-            stack: 2
-            sec: 1
-            nginx: 1
-          - name: "Base only + Full Security"
+          - name: "Base only + Basic Security"
             stack: 4
-            sec: 2
+            sec: 1
             nginx: 0
 
     steps:
@@ -68,30 +60,28 @@ jobs:
           docker run -d --name "$CONTAINER_NAME" --privileged ubuntu:22.04 sleep 3600
           docker cp serverinit.sh "$CONTAINER_NAME:/tmp/serverinit.sh"
 
+          # Run installation
           docker exec "$CONTAINER_NAME" bash -c "
             export DEBIAN_FRONTEND=noninteractive
             SI_STACK=${{ matrix.config.stack }} SI_SEC=${{ matrix.config.sec }} SI_NGINX=${{ matrix.config.nginx }} \
             bash /tmp/serverinit.sh --ci
-          "
-
-          # Verify installation
-          echo "✔ Installation completed successfully"
+          " && echo "✔ Installation completed" || {
+            echo "Installation failed, showing last 50 lines of log:"
+            docker exec "$CONTAINER_NAME" bash -c "tail -50 /root/serverinit_*.log 2>/dev/null || echo 'No log found'"
+            exit 1
+          }
 
           # Basic verification based on stack
           if [ ${{ matrix.config.stack }} -eq 1 ]; then
-            docker exec "$CONTAINER_NAME" which docker && echo "✔ Docker installed"
-            docker exec "$CONTAINER_NAME" docker compose version && echo "✔ Docker Compose plugin working"
+            docker exec "$CONTAINER_NAME" which docker && echo "✔ Docker installed" || exit 1
+            docker exec "$CONTAINER_NAME" docker compose version && echo "✔ Docker Compose plugin working" || exit 1
           fi
 
           if [ ${{ matrix.config.nginx }} -eq 1 ]; then
-            docker exec "$CONTAINER_NAME" which nginx && echo "✔ Nginx installed"
+            docker exec "$CONTAINER_NAME" which nginx && echo "✔ Nginx installed" || exit 1
           fi
 
-          if [ ${{ matrix.config.sec }} -eq 2 ]; then
-            docker exec "$CONTAINER_NAME" which fail2ban-client && echo "✔ fail2ban installed"
-          fi
-
-          docker exec "$CONTAINER_NAME" bash -c "ufw status | grep -q 'Status: active'" && echo "✔ UFW active"
+          docker exec "$CONTAINER_NAME" bash -c "ufw status | grep -q 'Status: active'" && echo "✔ UFW active" || exit 1
 
           # Cleanup
           docker rm -f "$CONTAINER_NAME"

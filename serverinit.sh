@@ -265,12 +265,15 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Internet check ─────────────────────────────────────────────────────────────
-info "Проверяем сетевое соединение..."
-if ! curl -fsSL --max-time 5 https://1.1.1.1 > /dev/null 2>&1 \
-   && ! ping -c1 -W3 1.1.1.1 > /dev/null 2>&1; then
-  err "Нет интернет-соединения. Проверь сеть и повтори."
+# Skip in CI mode when running in containerized environments (GitHub Actions, etc.)
+if [[ $CI_MODE -eq 0 ]]; then
+  info "Проверяем сетевое соединение..."
+  if ! curl -fsSL --max-time 5 https://1.1.1.1 > /dev/null 2>&1 \
+     && ! ping -c1 -W3 1.1.1.1 > /dev/null 2>&1; then
+    err "Нет интернет-соединения. Проверь сеть и повтори."
+  fi
+  ok "Сеть доступна"
 fi
-ok "Сеть доступна"
 
 # ── Banner ────────────────────────────────────────────────────────────────────
 [[ -t 1 ]] && clear
